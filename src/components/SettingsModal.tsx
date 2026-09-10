@@ -1,9 +1,13 @@
 // LLM 设置弹窗：配置 OpenAI 兼容的 Base URL / 模型 / API Key，
-// 支持常用服务商预设、连接测试；密钥只存在于服务端，前端仅显示掩码。
-// LLM settings modal — configures an OpenAI-compatible endpoint; the API key stays server-side.
+// 支持常用服务商预设、连接测试。静态版(无后端)下配置存 localStorage，
+// 密钥只保存在用户本机浏览器，前端仅显示掩码。
+// LLM settings modal — configures an OpenAI-compatible endpoint. In the static
+// (no-backend) build the config is stored in the user's own localStorage.
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { X, Loader2, CheckCircle2, XCircle, Plug, ChevronDown } from 'lucide-react';
+import { loadConfig, saveConfig, publicConfig } from '../lib/config';
+import { testConnection as testLlm } from '../lib/llm';
 
 interface Props {
   open: boolean;
@@ -40,15 +44,11 @@ export function SettingsModal({ open, onClose }: Props) {
     setApiKey('');
     setResult(null);
     setPresetOpen(false);
-    fetch('/api/settings')
-      .then((r) => r.json())
-      .then((cfg) => {
-        setBaseUrl(cfg.baseUrl || '');
-        setModel(cfg.model || '');
-        setApiKeyMask(cfg.apiKeyMask || '');
-        setHasKey(!!cfg.hasKey);
-      })
-      .catch(() => {});
+    const cfg = publicConfig(loadConfig());
+    setBaseUrl(cfg.baseUrl || '');
+    setModel(cfg.model || '');
+    setApiKeyMask(cfg.apiKeyMask || '');
+    setHasKey(!!cfg.hasKey);
   }, [open]);
 
   // Escape to close, matching the canvas rename convention.
@@ -87,41 +87,40 @@ export function SettingsModal({ open, onClose }: Props) {
     setTesting(true);
     setResult(null);
     try {
-      const res = await fetch('/api/llm/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, model, apiKey }),
-      });
-      const data = await res.json();
-      if (data.ok) setResult({ ok: true, msg: `连接成功：${data.reply}` });
-      else setResult({ ok: false, msg: data.error || '连接失败' });
-    } catch {
-      setResult({ ok: false, msg: '请求失败（无法连接服务器）' });
+      const stored = loadConfig() || { baseUrl: '', model: '', apiKey: '' };
+      const cfg = {
+        baseUrl: baseUrl.trim() || stored.baseUrl,
+        model: model.trim() || stored.model,
+        apiKey: apiKey.trim() || stored.apiKey,
+      };
+      if (!cfg.baseUrl) { setResult({ ok: false, msg: '请填写 Base URL' }); setTesting(false); return; }
+      if (!cfg.model) { setResult({ ok: false, msg: '请填写模型名称' }); setTesting(false); return; }
+      if (!cfg.apiKey) { setResult({ ok: false, msg: '请填写 API Key 后再测试' }); setTesting(false); return; }
+      const reply = await testLlm(cfg);
+      setResult({ ok: true, msg: `连接成功：${String(reply).slice(0, 200)}` });
+    } catch (e) {
+      setResult({ ok: false, msg: (e as Error).message || '连接失败' });
     } finally {
       setTesting(false);
     }
   };
 
-  const handleSave = async () => {
+  const handleSave = () => {
     setSaving(true);
     setResult(null);
     try {
-      const res = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, model, apiKey }),
+      saveConfig({
+        baseUrl: baseUrl.trim(),
+        model: model.trim(),
+        apiKey: apiKey.trim(),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setApiKeyMask(data.apiKeyMask || '');
-        setHasKey(!!data.hasKey);
-        setApiKey('');
-        setResult({ ok: true, msg: '设置已保存' });
-      } else {
-        setResult({ ok: false, msg: data.error || '保存失败' });
-      }
+      const pub = publicConfig(loadConfig());
+      setApiKeyMask(pub.apiKeyMask || '');
+      setHasKey(!!pub.hasKey);
+      setApiKey('');
+      setResult({ ok: true, msg: '设置已保存（保存在本机浏览器）' });
     } catch {
-      setResult({ ok: false, msg: '保存失败（无法连接服务器）' });
+      setResult({ ok: false, msg: '保存失败' });
     } finally {
       setSaving(false);
     }

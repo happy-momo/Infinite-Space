@@ -5,6 +5,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { NodeData } from '../types';
 import { X, Type, Image as ImageIcon, Link, Edit2, Check, Upload, ChevronDown } from 'lucide-react';
+import { fetchLinkInfo } from '../lib/linkinfo';
 
 const FONTS = [
   { label: 'Default Font', value: '' },
@@ -417,8 +418,7 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
             const url = link.url.trim();
             if (!/^https?:\/\//i.test(url)) return;
             try {
-              const res = await fetch(`/api/linkinfo?url=${encodeURIComponent(url)}`);
-              const data = await res.json();
+              const data = await fetchLinkInfo(url);
               if (!data.ok) return;
               const updated = { ...link };
               if (!updated.title && data.title) updated.title = String(data.title).slice(0, 200);

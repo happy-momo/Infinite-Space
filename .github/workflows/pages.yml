@@ -1,0 +1,56 @@
+# 构建前端并部署到 GitHub Pages。
+# 触发:push 到 deployed 分支。仓库需在 Settings → Pages 里把 Source 设为 "GitHub Actions"。
+# Builds the static frontend and deploys it to GitHub Pages (from the `deployed` branch).
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [deployed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build:pages
+
+      - name: Upload Pages artifact
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -16,6 +16,8 @@ import { initialNodes } from './data';
 import { CanvasListItem } from './components/CanvasListItem';
 import { SettingsModal } from './components/SettingsModal';
 import { useHistory } from './hooks/useHistory';
+import { loadConfig } from './lib/config';
+import { organizeNodes as organizeLlm, summarizeBoard as summarizeLlm } from './lib/llm';
 import { Plus, Layout, ChevronUp, ChevronDown, Sun, Moon } from 'lucide-react';
 
 const escapeHtml = (s: string) =>
@@ -164,18 +166,6 @@ export default function App() {
     };
   }, []);
 
-  const postBundle = useCallback(async () => {
-    try {
-      await fetch('/api/data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildBundle()),
-      });
-    } catch (e) {
-      console.error('Failed to save state to server:', e);
-    }
-  }, [buildBundle]);
-
   // ---- Export / Import (JSON) ----
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -222,7 +212,6 @@ export default function App() {
     }
     setSelectedIds(new Set());
     setSelectedEdgeIds(new Set());
-    scheduleServerSave();
   };
 
   const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -239,57 +228,6 @@ export default function App() {
     };
     reader.readAsText(file);
   };
-
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleServerSave = useCallback(() => {
-    if (saveTimer.current) clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => { postBundle(); }, 700);
-  }, [postBundle]);
-
-  // Hydrate from server on mount; migrate localStorage state up if server is empty.
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/api/data');
-        const data = await res.json();
-        if (data && Array.isArray(data.pages) && data.pages.length > 0) {
-          const pid = data.pages.some((p: Page) => p.id === data.currentPageId)
-            ? data.currentPageId
-            : data.pages[0].id;
-          localStorage.setItem('canvas_pages', JSON.stringify(data.pages));
-          localStorage.setItem('canvas_current_page', pid);
-          Object.entries(data.nodes || {}).forEach(([k, v]) =>
-            localStorage.setItem(`canvas_nodes_${k}`, JSON.stringify(v)));
-          Object.entries(data.edges || {}).forEach(([k, v]) =>
-            localStorage.setItem(`canvas_edges_${k}`, JSON.stringify(v)));
-          Object.entries(data.viewports || {}).forEach(([k, v]) =>
-            localStorage.setItem(`canvas_viewport_${k}`, JSON.stringify(v)));
-          setPages(data.pages);
-          setCurrentPageId(pid);
-          setNodes(data.nodes?.[pid] || []);
-          setEdges(data.edges?.[pid] || []);
-          const vp = data.viewports?.[pid];
-          if (vp) { x.set(vp.vx); y.set(vp.vy); scale.set(vp.vs); }
-        } else {
-          // Server empty → push the current localStorage state up once.
-          scheduleServerSave();
-        }
-      } catch (e) {
-        console.error('Failed to load state from server, using local cache:', e);
-      }
-    })();
-  }, []);
-
-  // Debounced server save on state changes.
-  useEffect(() => {
-    scheduleServerSave();
-  }, [pages, currentPageId, nodes, edges, scheduleServerSave]);
-
-  // Debounced server save on viewport (pan/zoom) changes.
-  useEffect(() => {
-    const unsubs = [x, y, scale].map((mv) => mv.on('change', scheduleServerSave));
-    return () => unsubs.forEach((u) => u());
-  }, [x, y, scale, scheduleServerSave]);
 
   const handleDeletePage = (e: React.MouseEvent, pageId: string) => {
     e.stopPropagation();
@@ -653,47 +591,42 @@ export default function App() {
 
   const handleAiOrganize = async () => {
     setIsOrganizing(true);
+    const cfg = loadConfig();
+    if (!cfg || !cfg.apiKey || !cfg.model || !cfg.baseUrl) {
+      alert("请先在设置中配置 LLM（Base URL / 模型 / API Key）");
+      setIsOrganizing(false);
+      return;
+    }
     try {
-      const response = await fetch('/api/organize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
-      });
-
-      const data = await response.json();
-
-      if (response.ok && data.positions) {
-        beginTransaction();
-        const labelNodes: NodeData[] = (data.groups || []).map((g: any) => ({
-          id: Math.random().toString(36).substring(7),
-          type: 'text',
-          x: g.x,
-          y: g.y - 44,
-          content: `<p><b>${escapeHtml(String(g.name || '组'))}</b></p>`,
-          color: 'rgba(255, 255, 255, 0.6)',
-          width: 200,
-          height: 36,
-          fontSize: 13,
-          zIndex: maxZ + 1,
-        }));
-        setMaxZ((prev) => prev + 1);
-        setNodes(prev => [
-          ...prev.map(n => {
-            const newPos = data.positions.find((p: any) => p.id === n.id);
-            if (newPos) {
-              return { ...n, x: newPos.x, y: newPos.y };
-            }
-            return n;
-          }),
-          ...labelNodes,
-        ]);
-        fitViewport(data.positions);
-      } else {
-        alert(data.error || "Failed to organize nodes");
-      }
+      const data = await organizeLlm(nodes, edges, cfg);
+      beginTransaction();
+      const labelNodes: NodeData[] = (data.groups || []).map((g: any) => ({
+        id: Math.random().toString(36).substring(7),
+        type: 'text',
+        x: g.x,
+        y: g.y - 44,
+        content: `<p><b>${escapeHtml(String(g.name || '组'))}</b></p>`,
+        color: 'rgba(255, 255, 255, 0.6)',
+        width: 200,
+        height: 36,
+        fontSize: 13,
+        zIndex: maxZ + 1,
+      }));
+      setMaxZ((prev) => prev + 1);
+      setNodes(prev => [
+        ...prev.map(n => {
+          const newPos = (data.positions || []).find((p: any) => p.id === n.id);
+          if (newPos) {
+            return { ...n, x: newPos.x, y: newPos.y };
+          }
+          return n;
+        }),
+        ...labelNodes,
+      ]);
+      fitViewport(data.positions);
     } catch (e) {
       console.error(e);
-      alert("调用 AI 整理失败，请检查服务与 LLM 配置");
+      alert((e instanceof Error && e.message) ? e.message : "调用 AI 整理失败，请检查服务与 LLM 配置");
     } finally {
       setIsOrganizing(false);
     }
@@ -745,32 +678,29 @@ export default function App() {
           flushSync(() => el.blur());
         }
       }
-      const snap = stateRef.current;
-      const response = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodes: snap.nodes.filter((n) => n.id !== storyNodeId),
-          edges: snap.edges,
-          instruction: opts.instruction,
-          style: opts.style,
-        }),
-      });
-      const data = await response.json();
-      if (response.ok && data.summary) {
-        beginTransaction();
-        const html = `<p><b>看板故事线</b></p>${textToHtml(data.summary)}`;
-        const estimatedLines = Math.max(1, Math.ceil(data.summary.length / 42));
-        handleUpdateNode(storyNodeId, {
-          content: html,
-          height: Math.min(640, Math.max(240, estimatedLines * 24 + 120)),
-        });
-      } else {
-        alert(data.error || '重新生成失败');
+      const cfg = loadConfig();
+      if (!cfg || !cfg.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在设置中配置 LLM（Base URL / 模型 / API Key）');
+        setStoryBusy(false);
+        return;
       }
+      const snap = stateRef.current;
+      const summary = await summarizeLlm(
+        snap.nodes.filter((n) => n.id !== storyNodeId),
+        snap.edges,
+        cfg,
+        { instruction: opts.instruction, style: opts.style },
+      );
+      beginTransaction();
+      const html = `<p><b>看板故事线</b></p>${textToHtml(summary)}`;
+      const estimatedLines = Math.max(1, Math.ceil(summary.length / 42));
+      handleUpdateNode(storyNodeId, {
+        content: html,
+        height: Math.min(640, Math.max(240, estimatedLines * 24 + 120)),
+      });
     } catch (e) {
       console.error(e);
-      alert('重新生成失败，请检查服务与 LLM 配置');
+      alert((e instanceof Error && e.message) ? e.message : '重新生成失败，请检查服务与 LLM 配置');
     } finally {
       setStoryBusy(false);
     }
@@ -822,21 +752,18 @@ export default function App() {
           flushSync(() => el.blur());
         }
       }
-      const snap = stateRef.current;
-      const response = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: snap.nodes, edges: snap.edges }),
-      });
-      const data = await response.json();
-      if (response.ok && data.summary) {
-        addSummaryNode(data.summary);
-      } else {
-        alert(data.error || "AI 总结失败");
+      const cfg = loadConfig();
+      if (!cfg || !cfg.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在设置中配置 LLM（Base URL / 模型 / API Key）');
+        setIsSummarizing(false);
+        return;
       }
+      const snap = stateRef.current;
+      const summary = await summarizeLlm(snap.nodes, snap.edges, cfg);
+      addSummaryNode(summary);
     } catch (e) {
       console.error(e);
-      alert("调用 AI 总结失败，请检查服务与 LLM 配置");
+      alert((e instanceof Error && e.message) ? e.message : "调用 AI 总结失败，请检查服务与 LLM 配置");
     } finally {
       setIsSummarizing(false);
     }

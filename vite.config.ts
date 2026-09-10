@@ -5,6 +5,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // GitHub Pages 子路径子站点:部署在 https://happy-momo.github.io/Infinite-Space/
+    // 若发布到自定义域名或用户首页,改为 '/'。
+    base: '/Infinite-Space/',
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
