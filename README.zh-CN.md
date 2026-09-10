@@ -26,6 +26,8 @@
 - **真正理解你画布内容的 AI** —— *AI 整理* 把相关节点聚类并生成带标签的整洁布局;*AI 总结* 把整块画布串成一条连贯的故事线,还能用不同风格重新生成。
 - **本地优先** —— 画布数据住在浏览器 localStorage;可选的 Express 后端补充服务端持久化、LLM 代理与链接元数据增强。
 
+> 🌐 **在线体验:** 打开即用的本地优先线上版本 → **[https://happy-momo.github.io/Infinite/](https://happy-momo.github.io/Infinite/)**
+
 ---
 
 ## ✨ 功能特性

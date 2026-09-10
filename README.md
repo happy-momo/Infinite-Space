@@ -26,6 +26,8 @@
 - **AI that understands your board** — *AI Organize* groups related nodes and lays them out with labeled clusters; *AI Story* summarizes the whole board into a coherent storyline node you can regenerate in different styles.
 - **Local-first** — your canvas lives in your browser's localStorage; an optional Express backend adds server persistence, LLM proxying, and link-metadata enrichment.
 
+> 🌐 **Try it online:** open the local-first, no-backend live build → **[https://happy-momo.github.io/Infinite/](https://happy-momo.github.io/Infinite/)**
+
 ---
 
 ## ✨ Highlights
