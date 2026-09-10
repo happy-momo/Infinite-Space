@@ -87,6 +87,37 @@ npm run build   # bundles the frontend + server into dist/
 npm start       # serve everything on http://127.0.0.1:3000
 ```
 
+## 🐳 Docker Deployment
+
+A multi-stage `Dockerfile` (Node 22, Alpine), `.dockerignore`, and `docker-compose.yml` are included — everything runs in **one container** (the Express server serves the built React frontend) with the `data/` folder persisted on a volume.
+
+**Requirements:** [Docker](https://www.docker.com/products/docker-desktop/) with Compose.
+
+```bash
+docker compose up -d      # build + start
+# Open http://localhost:3000
+
+docker compose logs -f    # view logs
+docker compose down       # stop (data stays in the volume)
+```
+
+Or without Compose:
+
+```bash
+docker build -t infinite-space .
+docker run -d -p 3000:3000 \
+  -e HOST=0.0.0.0 \
+  -v infinite-space-data:/app/data \
+  infinite-space
+```
+
+**Notes**
+
+- The image already sets `HOST=0.0.0.0` and `NODE_ENV=production`, so it listens on all interfaces and serves the static build. `PORT` (default `3000`) and `HOST` can be overridden via env.
+- Data (canvas state + LLM config, including API keys) lives in the **named volume** `infinite-space-data` mounted at `/app/data`; it is never baked into the image. To reuse an existing local `data/` directory instead, change the volume line in `docker-compose.yml` from `- infinite-space-data:/app/data` to `- ./data:/app/data`.
+- The container runs as a non-root `app` user with restrictive file permissions (`0600`/`0700`) on `data/`.
+- Because the bundled server references `vite` at import time, the runtime image installs the full dependency set (it cannot use `--omit=dev`).
+
 ## 🧭 User Guide
 
 ### Canvas basics

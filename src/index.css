@@ -1,5 +1,5 @@
-// 全局样式：Tailwind 入口、class 级暗色模式、画布点阵背景与自定义滚动条。
-// Global styles: Tailwind entry, class-based dark mode, canvas dot-grid background and custom scrollbars.
+/* 全局样式：Tailwind 入口、class 级暗色模式、画布点阵背景与自定义滚动条。 */
+/* Global styles: Tailwind entry, class-based dark mode, canvas dot-grid background and custom scrollbars. */
 @import "tailwindcss";
 @plugin "@tailwindcss/typography";
 

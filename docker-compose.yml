@@ -1,0 +1,24 @@
+# Docker Compose：一条命令构建并运行 Infinite Space。
+# 用法：docker compose up -d
+# 访问：http://localhost:3000
+
+services:
+  infinite-space:
+    build: .
+    image: infinite-space:latest
+    container_name: infinite-space
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # 容器内必须监听 0.0.0.0，否则外部访问不到（默认 127.0.0.1）
+      HOST: 0.0.0.0
+      PORT: 3000
+    volumes:
+      # 画布状态 + LLM 配置持久化到命名卷。
+      # 首次启动为空；若想沿用宿主机已有 data/，改用下面这行：
+      #   - ./data:/app/data
+      - infinite-space-data:/app/data
+
+volumes:
+  infinite-space-data:

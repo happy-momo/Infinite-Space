@@ -1,0 +1,32 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# 运行时数据（含 API Key，绝不能打进镜像）
+data/
+
+# VCS
+.git/
+.gitignore
+
+# 文档与日志
+docs/
+*.log
+npm-debug.log*
+
+# 环境变量（密钥）
+.env
+.env.local
+.env.*.local
+
+# 配置与 IDE
+Dockerfile
+docker-compose.yml
+.env.example
+.claude/
+.vscode/
+README.md
+README.zh-CN.md
+
+# 本地目录
+local/

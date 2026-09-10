@@ -87,6 +87,37 @@ npm run build   # 前端 + 服务端打包到 dist/
 npm start       # 在 http://127.0.0.1:3000 提供全部服务
 ```
 
+## 🐳 Docker 部署
+
+项目已附带多阶段 `Dockerfile`(Node 22, Alpine)、`.dockerignore` 与 `docker-compose.yml`——**单个容器**即可跑起来(Express 直接托管构建好的 React 前端),`data/` 目录通过卷持久化。
+
+**环境要求:** 安装 [Docker](https://www.docker.com/products/docker-desktop/)(含 Compose)。
+
+```bash
+docker compose up -d      # 构建 + 启动
+# 访问 http://localhost:3000
+
+docker compose logs -f    # 查看日志
+docker compose down       # 停止(数据保留在卷中)
+```
+
+不使用 Compose 也可:
+
+```bash
+docker build -t infinite-space .
+docker run -d -p 3000:3000 \
+  -e HOST=0.0.0.0 \
+  -v infinite-space-data:/app/data \
+  infinite-space
+```
+
+**说明**
+
+- 镜像内置 `HOST=0.0.0.0` 与 `NODE_ENV=production`,无需额外配置即可监听所有网卡并托管静态构建产物;`PORT`(默认 `3000`)与 `HOST` 均可用环境变量覆盖。
+- 数据(画布状态 + LLM 配置,含 API Key)保存在**命名卷** `infinite-space-data`,挂载到 `/app/data`,**不会**打进镜像。若想沿用本机已有的 `data/` 目录,把 `docker-compose.yml` 里的 `- infinite-space-data:/app/data` 改成 `- ./data:/app/data` 即可。
+- 容器以非 root 的 `app` 用户运行,`data/` 文件使用受限权限(`0600`/`0700`)。
+- 由于打包产物在运行时会 `require("vite")`,运行镜像安装的是**完整依赖**(不能使用 `--omit=dev`)。
+
 ## 🧭 使用指南
 
 ### 画布基础操作
