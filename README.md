@@ -50,18 +50,8 @@
 
 > *Drop a few screenshots here — a wide shot of a busy board, the AI Organize before/after, and dark mode. A good first screenshot is the single best thing you can do for this project.*
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  [Toolbar: T · 🖼 · 🔗 | ⛓ · ↩ · ↪ | ✨ Organize · 📖 Story] │
-│                                                              │
-│        ┌──────────┐        ┌─────────────┐                   │
-│        │ Ideas…   │────────│  Links…     │   [ minimap ]     │
-│        └──────────┘        └─────────────┘   [ viewport ]    │
-│   ┌────────────────┐                                        │
-│   │ AI Story: …     │   [ + New page 1 · 2 · 3 ]             │
-│   └────────────────┘                                        │
-└──────────────────────────────────────────────────────────────┘
-```
+<img width="1920" height="953" alt="image" src="https://github.com/user-attachments/assets/fc9a62b7-f67e-4f9e-9477-b07df06f7388" />
+
 
 ## 🚀 Quick Start
 
