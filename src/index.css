@@ -1,0 +1,57 @@
+// 全局样式：Tailwind 入口、class 级暗色模式、画布点阵背景与自定义滚动条。
+// Global styles: Tailwind entry, class-based dark mode, canvas dot-grid background and custom scrollbars.
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Class-based dark mode (toggle .dark on the app root). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-background: #f8f9fa;
+}
+
+body, html, #root {
+  margin: 0;
+  padding: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background-color: #f8f9fa;
+  touch-action: none;
+}
+
+.dark body {
+  background-color: #0f172a;
+}
+
+.canvas-bg {
+  background-image: radial-gradient(#cbd5e1 1px, transparent 0);
+  background-size: 32px 32px;
+}
+
+.dark .canvas-bg {
+  background-image: radial-gradient(#334155 1px, transparent 0);
+}
+
+textarea::-webkit-scrollbar {
+  width: 6px;
+}
+textarea::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.35);
+  border-radius: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.5);
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
