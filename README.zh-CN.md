@@ -50,7 +50,8 @@
 
 ## 📸 截图
 
-<img width="1920" height="953" alt="image" src="https://github.com/user-attachments/assets/1469fbc2-7c9d-4f14-8664-4ad1c416b6b4" />
+<img width="1892" height="891" alt="infinite" src="https://github.com/user-attachments/assets/04375732-f05e-4d4d-a0a4-fc2d7e91658d" />
+
 
 ## 🚀 快速开始
 
