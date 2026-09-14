@@ -1,0 +1,17 @@
+{
+  "name": "Infinite Space",
+  "short_name": "Infinite Space",
+  "description": "AI-powered infinite canvas for your thoughts, images and collections.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f8f9fa",
+  "theme_color": "#6366f1",
+  "icons": [
+    {
+      "src": "/icons/icon-512.svg",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

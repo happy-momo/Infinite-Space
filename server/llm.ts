@@ -128,6 +128,12 @@ export interface NodeInput {
   y?: number;
   width?: number;
   height?: number;
+  tableData?: { text?: string; isHeader?: boolean }[][];
+  chartConfig?: {
+    chartType?: string;
+    title?: string;
+    data?: { label: string; value: number; series?: string }[];
+  };
 }
 
 export interface Position {
@@ -139,18 +145,39 @@ export interface Position {
 const MAX_NODES = 60;
 const MAX_CONTENT = 500;
 
+function serializeContent(n: NodeInput): string {
+  if (n.type === 'image') {
+    return typeof n.content === 'string' && n.content.startsWith('http')
+      ? `[image url] ${n.content.slice(0, 120)}`
+      : '[image]';
+  }
+  // 表格节点：把 tableData 转成 `|` 分隔的文本行，供 LLM 理解表格内容
+  if (n.type === 'table' && Array.isArray(n.tableData)) {
+    const rows = n.tableData
+      .slice(0, 20)
+      .map((row) => row.slice(0, 10).map((c) => String(c?.text ?? '')).join(' | '));
+    const suffix = n.tableData.length > 20 ? `\n...(共 ${n.tableData.length} 行)` : '';
+    return `[table]\n${rows.join('\n')}${suffix}`.slice(0, MAX_CONTENT * 2);
+  }
+  // 图表节点：输出标题 + 数据摘要
+  if (n.type === 'chart' && n.chartConfig) {
+    const cfg = n.chartConfig;
+    const points = (cfg.data || [])
+      .slice(0, 20)
+      .map((d) => `${d.label}: ${d.value}`)
+      .join(', ');
+    return `[chart ${cfg.chartType || ''}] ${cfg.title || ''} | ${points}`.slice(0, MAX_CONTENT);
+  }
+  return (n.content || '').slice(0, MAX_CONTENT);
+}
+
 function serializeNodes(nodes: NodeInput[]) {
   const shown = nodes.slice(0, MAX_NODES);
   return {
     list: shown.map((n) => ({
       id: n.id,
       type: n.type,
-      content:
-        n.type === 'image'
-          ? typeof n.content === 'string' && n.content.startsWith('http')
-            ? `[image url] ${n.content.slice(0, 120)}`
-            : '[image]'
-          : (n.content || '').slice(0, MAX_CONTENT),
+      content: serializeContent(n),
       x: n.x,
       y: n.y,
       width: n.width,
@@ -448,6 +475,191 @@ ${opts.instruction ? `\n用户的额外要求：${opts.instruction}（在保持�
 5. 故事线：在【不虚构任何关系与事实】的前提下串联。只把有真实连接的内容自然串起来；不同实体、无连接的节点之间禁止编造关系（如“同事”“同学”“好友”），必须分开段落分别叙述。宁可分段，也不要虚构。不要把只属于某个节点的内容（如“毕业于北京大学”）安到别的节点上。总字数控制在 800 字以内。
 `;
   return sanitizeText(await callLlm(cfg, system, user));
+}
+
+export interface ChatTurn {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+}
+
+// 流式调用 LLM（SSE + stream:true），把增量文本逐个交给 onDelta 回调。
+// 返回值为完成；错误统一抛 LlmError。供服务端 /api/llm/chat 使用。
+export async function streamLlm(
+  cfg: LlmConfig,
+  messages: ChatTurn[],
+  onDelta: (delta: string) => void,
+  timeoutMs: number = DEFAULT_TIMEOUT,
+): Promise<void> {
+  if (!cfg?.apiKey) throw new LlmError('未配置 API Key');
+  if (!cfg?.model) throw new LlmError('未配置模型名称');
+  const url = normalizeUrl(cfg.baseUrl);
+
+  const res = await fetchWithTimeout(
+    url,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${cfg.apiKey}`,
+      },
+      body: JSON.stringify({
+        model: cfg.model,
+        temperature: 0,
+        stream: true,
+        messages,
+      }),
+    },
+    timeoutMs,
+  );
+
+  if (!res.ok) {
+    let msg = `LLM 服务返回 HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body?.error?.message) msg = `${msg}: ${body.error.message}`;
+    } catch { /* ignore non-json body */ }
+    throw new LlmError(msg, res.status);
+  }
+
+  if (!res.body) throw new LlmError('LLM 响应缺少流式 body');
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+      const line = buffer.slice(0, idx).trim();
+      buffer = buffer.slice(idx + 1);
+      if (!line.startsWith('data:')) continue;
+      const payload = line.replace(/^data:\s*/, '').trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const json = JSON.parse(payload);
+        const delta = json?.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string' && delta) onDelta(delta);
+      } catch { /* skip malformed lines */ }
+    }
+  }
+}
+
+export interface ChartResult {
+  chartType: 'bar' | 'line' | 'pie';
+  title: string;
+  xAxis: string;
+  yAxis: string;
+  data: { label: string; value: number }[];
+  reason: string;
+}
+
+// AI 分析表格数据，决定图表类型并清洗出数值数据。
+// 只允许返回 bar/line/pie 三种类型；数值由模型从表格中提取。
+export async function analyzeChart(
+  cfg: LlmConfig,
+  rows: string[][],
+  instruction?: string,
+): Promise<ChartResult> {
+  if (!rows.length) throw new LlmError('表格为空，无法生成图表');
+  const tableText = rows.slice(0, 50).map((r) => r.join(' | ')).join('\n');
+
+  const system =
+    '你是一个数据可视化助手。只返回 JSON，不要多余文字，不要 markdown。';
+  const user = `
+下面是用户表格数据（第一行通常是表头）：
+${tableText}
+${instruction ? `\n用户的额外要求：${instruction}` : ''}
+
+请分析这些数据，并决定用哪种图表展示最合适（bar=柱状图 / line=折线图 / pie=饼图）。
+要求：
+1. chartType 只能取 "bar"、"line"、"pie" 三者之一。
+2. title 用简短中文标题（不超过 20 字）。
+3. 选择一个合适的"类别"列作为 label（如名称、月份、类型），选择一个"数值"列作为 value（必须是数字；若是百分比、货币、千分位等，请先转换为纯数字，例如 85.5% → 85.5，¥1,200 → 1200）。
+4. data 数组：每个条目 {label, value}，label 取类别值，value 取对应数值。不要遗漏数据行。
+5. reason 用一句话说明为什么选这种图表（不超过 40 字）。
+
+只返回 JSON，格式：
+{"chartType":"bar","title":"标题","xAxis":"列名","yAxis":"列名","data":[{"label":"...","value":123}],"reason":"..."}
+`;
+
+  const text = await callLlm(cfg, system, user);
+  const parsed = extractJson(text) as any;
+
+  if (!parsed || typeof parsed !== 'object') throw new LlmError('图表分析返回格式非法');
+  const ct = parsed.chartType;
+  if (ct !== 'bar' && ct !== 'line' && ct !== 'pie') throw new LlmError(`不支持的图表类型: ${ct}`);
+
+  const data: { label: string; value: number }[] = Array.isArray(parsed.data)
+    ? parsed.data
+        .filter((d: any) => d && typeof d.label === 'string' && typeof d.value === 'number' && isFinite(d.value))
+        .map((d: any) => ({ label: d.label, value: d.value }))
+    : [];
+
+  if (data.length === 0) throw new LlmError('未能从表格中提取到有效的数值数据');
+
+  return {
+    chartType: ct,
+    title: typeof parsed.title === 'string' ? parsed.title : '数据图表',
+    xAxis: typeof parsed.xAxis === 'string' ? parsed.xAxis : '',
+    yAxis: typeof parsed.yAxis === 'string' ? parsed.yAxis : '',
+    data,
+    reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+  };
+}
+
+export interface AssociateSuggestion {
+  nodeId: string;
+  reason: string;
+  confidence: number; // 0-1，由 LLM 给出的相关度评分
+}
+
+// AI 自动联想：给定源节点 id 和全部节点，找出语义上最相关的 N 个节点。
+export async function associateNodes(
+  cfg: LlmConfig,
+  allNodes: NodeInput[],
+  sourceId: string,
+  limit: number = 5,
+): Promise<{ suggestions: AssociateSuggestion[] }> {
+  const source = allNodes.find((n) => n.id === sourceId);
+  if (!source) return { suggestions: [] };
+  const others = allNodes.filter((n) => n.id !== sourceId).slice(0, 100);
+  if (others.length === 0) return { suggestions: [] };
+
+  const listText = others
+    .map((n) => `- ${n.id}(${n.type}) ${(n.content || '').slice(0, 300).replace(/\s+/g, ' ')}`)
+    .join('\n');
+
+  const system = '你是一个语义联想助手。只返回 JSON，不要多余文字。';
+  const user = `
+源节点（id=${source.id}，类型：${source.type}）的内容：
+"${(source.content || '').slice(0, 500).replace(/\s+/g, ' ')}"
+
+候选节点列表：
+${listText}
+
+请从上面的候选节点中找出与源节点语义上最相关的 ${Math.min(limit, others.length)} 个，按相关性从高到低排序。
+每个建议给出：nodeId（候选节点 id）、reason（一句话说明为什么相关，不超过 40 字）、confidence（0-1 之间的相关性评分）。
+
+只返回 JSON，格式：
+{"suggestions":[{"nodeId":"...","reason":"...","confidence":0.85}]}
+`;
+
+  const text = await callLlm(cfg, system, user);
+  const parsed = extractJson(text);
+  const raw = Array.isArray((parsed as any)?.suggestions) ? (parsed as any).suggestions : [];
+
+  const suggestions: AssociateSuggestion[] = raw
+    .filter((s: any) => s && typeof s.nodeId === 'string' && others.some((o) => o.id === s.nodeId))
+    .slice(0, limit)
+    .map((s: any) => ({
+      nodeId: s.nodeId,
+      reason: typeof s.reason === 'string' ? s.reason : '',
+      confidence: typeof s.confidence === 'number' ? Math.max(0, Math.min(1, s.confidence)) : 0.5,
+    }));
+
+  return { suggestions };
 }
 
 export async function testConnection(cfg: LlmConfig): Promise<string> {

@@ -20,6 +20,10 @@ docs/
 # ---- 本地个性化配置 ----
 # Claude Code 本地设置（含个人偏好），随机器而异。
 .claude/settings.local.json
+# VS Code 个人设置（Python/conda 环境等），不入库。
+.vscode/
+# Google AI Studio 脚手架残留的空目录。
+public/assets/
 
 # ---- 日志 / Logs ----
 *.log

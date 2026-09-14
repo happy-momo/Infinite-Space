@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, LlmError } from "./server/llm";
 
 dotenv.config();
 
@@ -125,6 +125,132 @@ async function startServer() {
     } catch (error) {
       const msg = error instanceof LlmError ? error.message : (error as Error).message;
       console.error("AI Summarize error:", msg);
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  // ---- AI Chat (SSE streaming) ----
+  // 把看板节点/连线序列化为上下文附加到 system 指令，让 AI 能"理解"当前画布。
+  const buildCanvasContext = (sys: string, ctx: { pageName?: string; nodes?: unknown[]; edges?: unknown[] } | undefined): string => {
+    if (!ctx || !Array.isArray(ctx.nodes) || ctx.nodes.length === 0) return sys;
+    const nodesText = ctx.nodes
+      .slice(0, 80)
+      .map((n: any) => {
+        let t = '';
+        if (n.type === 'table' && Array.isArray(n.tableData) && n.tableData.length > 0) {
+          t = n.tableData
+            .slice(0, 10)
+            .map((row: any[]) => row.map((c: any) => String(c?.text ?? '')).join(' | '))
+            .join('\n')
+            .slice(0, 600);
+        } else if (n.type === 'chart' && n.chartConfig) {
+          const pts = (n.chartConfig.data || [])
+            .slice(0, 15)
+            .map((d: any) => `${d.label}:${d.value}`)
+            .join(', ');
+          t = `[${n.chartConfig.chartType || 'chart'}] ${n.chartConfig.title || ''} | ${pts}`;
+        } else {
+          t = (typeof n.content === 'string' ? n.content : '')
+            .replace(/<[^>]*>/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 200);
+        }
+        return `- [${n.type || 'text'}] (id=${n.id}) ${t}`;
+      })
+      .join('\n');
+    const edgeText = (Array.isArray(ctx.edges) ? ctx.edges : [])
+      .slice(0, 100)
+      .map((e: any) => `${e.source} → ${e.target}`)
+      .join('\n');
+    return `${sys}\n\n当前看板「${ctx.pageName || '未命名'}」的内容：\n${nodesText}\n\n节点之间的连接：\n${edgeText || '（无）'}\n说明：你可以参考上面的看板内容回答问题，但不要编造看板中不存在的内容。`;
+  };
+
+  app.post("/api/llm/chat", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { messages, context } = req.body || {};
+      if (!Array.isArray(messages) || messages.length === 0) {
+        return res.status(400).json({ error: "Invalid messages" });
+      }
+      const system = buildCanvasContext(
+        "你是一个嵌入无限画布应用的 AI 助手。用简洁、友好的中文回答用户关于画布与节点内容的提问，也可帮用户梳理、扩展、总结思路。",
+        typeof context === "object" ? context : undefined,
+      );
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      const full = [{ role: "system", content: system }, ...messages];
+      await streamLlm(cfg, full as any, (delta) => {
+        res.write(`data: ${JSON.stringify({ delta, done: false })}\n\n`);
+      });
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      if (!res.headersSent) {
+        res.status(502).json({ error: msg });
+      } else {
+        res.write(`data: ${JSON.stringify({ error: msg, done: true })}\n\n`);
+        res.end();
+      }
+    }
+  });
+
+  // ---- AI Associate (node similarity suggestions) ----
+  app.post("/api/llm/associate", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM" });
+      }
+      const { nodeId, nodes, limit } = req.body || {};
+      if (!nodeId || !Array.isArray(nodes)) {
+        return res.status(400).json({ error: "Invalid nodes data" });
+      }
+      const result = await associateNodes(cfg, nodes, nodeId, limit || 5);
+      res.json(result);
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  // ---- AI Chart (analyze table data → chart config) ----
+  app.post("/api/llm/chart", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { rows, instruction } = req.body || {};
+      if (!Array.isArray(rows) || rows.length < 2) {
+        return res.status(400).json({ error: "表格数据至少需要两行（表头 + 数据）" });
+      }
+      // 只接受字符串二维数组，防止恶意 payload
+      const clean: string[][] = rows
+        .slice(0, 100)
+        .map((r) =>
+          Array.isArray(r)
+            ? r.slice(0, 30).map((c) => String(c ?? "").slice(0, 200))
+            : []
+        )
+        .filter((r) => r.length > 0);
+      const result = await analyzeChart(
+        cfg,
+        clean,
+        typeof instruction === "string" ? instruction.slice(0, 500) : undefined,
+      );
+      res.json(result);
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      console.error("AI Chart error:", msg);
       res.status(502).json({ error: msg });
     }
   });

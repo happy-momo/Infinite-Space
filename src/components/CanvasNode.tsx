@@ -1,10 +1,14 @@
 // 单个画布节点：文字/图片/链接三种类型的渲染、编辑、拖拽移动、缩放调整、
 // 字体与字号选择，以及连线模式下作为“目标”被点击。
 // Single canvas node — renders text/image/link cards and handles drag, resize and inline editing.
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { NodeData } from '../types';
-import { X, Type, Image as ImageIcon, Link, Edit2, Check, Upload, ChevronDown } from 'lucide-react';
+import { X, Type, Image as ImageIcon, Link, Edit2, Check, Upload, ChevronDown, FileCode2 } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { TableEditor } from './TableEditor';
+import { ChartNode } from './ChartNode';
 
 const FONTS = [
   { label: 'Default Font', value: '' },
@@ -15,6 +19,47 @@ const FONTS = [
   { label: 'Serif', value: "serif" },
   { label: 'Mono', value: "monospace" },
 ];
+
+// 转义 HTML，防止 Markdown 内容与代码注入原样 HTML。
+const escapeHtml = (s: string) =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// 轻量代码高亮：对常见语言的极简单关键词/字符串/注释上色，零依赖。
+// 返回包含 <span> 的 HTML 字符串，仅在非空代码块时启用。
+const highlightCode = (code: string, lang?: string): string => {
+  const escaped = escapeHtml(code);
+  const css = 'color:#e11d48;'; // rose 高亮关键词
+  const comment = 'color:#6b7280;font-style:italic;';
+  const str = 'color:#0ea5e9;';
+  return escaped
+    .replace(/("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/g, `<span style="${str}">$1</span>`) // 字符串
+    .replace(/(\/\/[^\n]*|\/\*[\s\S]*?\*\/)/g, `<span style="${comment}">$1</span>`)   // 注释
+    .replace(/\b(const|let|var|function|return|if|else|for|while|import|export|from|class|new|def|class|public|private|async|await|=>)\b/g, `<span style="${css}">$1</span>`); // 关键词
+};
+
+const markdownComponents = {
+  // 代码块：带语言徽标 + 浅色高亮
+  code({ className, children }: any) {
+    const inline = !className;
+    const lang = (className || '').replace('language-', '');
+    const str = String(children || '').replace(/\n$/, '');
+    if (inline) {
+      return <code className="px-1.5 py-0.5 rounded-md bg-black/5 text-pink-600 text-[0.85em] font-mono dark:bg-white/10 dark:text-pink-300">{children}</code>;
+    }
+    return (
+      <div className="my-2 rounded-lg overflow-hidden border border-black/10 bg-gray-50 dark:bg-gray-900/80 dark:border-white/10">
+        {lang && (
+          <div className="px-3 py-1 text-[10px] uppercase tracking-wider text-gray-400 border-b border-black/5 bg-gray-100/80 dark:bg-white/5 dark:text-gray-500">
+            {lang}
+          </div>
+        )}
+        <code className="block p-3 text-[0.82em] leading-relaxed font-mono overflow-x-auto custom-scrollbar text-gray-800 dark:text-gray-100"
+          dangerouslySetInnerHTML={{ __html: highlightCode(str, lang) }}
+        />
+      </div>
+    );
+  },
+};
 
 const getValidUrl = (url?: string) => {
   if (!url) return '#';
@@ -106,13 +151,28 @@ interface Props {
   isLinking: boolean;
   onLinkClick: (id: string) => void;
   onTransactionStart: () => void;
+  /** 从节点边缘拖出，开始连线/新建节点（P0 连线增强） */
+  onDragEdgeStart: (e: React.PointerEvent, sourceId: string) => void;
+  /** 标签筛选时该节点是否淡化（不匹配当前筛选） */
+  dimmed?: boolean;
+  /** 表格节点：请求 AI 生成图表 */
+  onGenerateChart?: (tableNodeId: string) => void;
+  /** 该表格节点是否正在生成图表 */
+  isGeneratingChart?: boolean;
 }
 
-export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected, onSelect, isLinking, onLinkClick, onTransactionStart }: Props) {
+export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected, onSelect, isLinking, onLinkClick, onTransactionStart, onDragEdgeStart, dimmed, onGenerateChart, isGeneratingChart }: Props) {
   const [isHovered, setIsHovered] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isFontPickerOpen, setIsFontPickerOpen] = useState(false);
+  // Markdown 编辑草稿（存 Markdown 原文）
+  const [markdownDraft, setMarkdownDraft] = useState('');
   const contentEditableRef = useRef<HTMLDivElement>(null);
+  const markdownRef = useRef<HTMLTextAreaElement>(null);
+  // 标签：选中时可添加/删除
+  const [isTagInput, setIsTagInput] = useState(false);
+  const [tagDraft, setTagDraft] = useState('');
+  const tagInputRef = useRef<HTMLInputElement>(null);
 
   const handleSaveEdit = () => {
     if (isEditing) {
@@ -121,10 +181,22 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
         if (html !== node.content) {
           onUpdate(node.id, { content: html });
         }
+      } else if (node.type === 'markdown' && markdownDraft !== node.content) {
+        onUpdate(node.id, { content: markdownDraft });
       }
       setIsEditing(false);
     }
   };
+
+  const addTag = (raw: string) => {
+    const t = raw.trim();
+    if (!t) return;
+    const cur = node.tags || [];
+    if (!cur.includes(t)) onUpdate(node.id, { tags: [...cur, t] });
+    setTagDraft('');
+    setIsTagInput(false);
+  };
+  const removeTag = (t: string) => onUpdate(node.id, { tags: (node.tags || []).filter((x) => x !== t) });
 
   const handleBoldClick = (e: React.PointerEvent) => {
     e.preventDefault();
@@ -139,8 +211,12 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
   };
 
   useEffect(() => {
-    if (isEditing && node.type === 'text' && contentEditableRef.current) {
+    if (!isEditing) return;
+    if (node.type === 'text' && contentEditableRef.current) {
       contentEditableRef.current.focus();
+    } else if (node.type === 'markdown') {
+      setMarkdownDraft(node.content);
+      if (markdownRef.current) markdownRef.current.focus();
     }
   }, [isEditing]);
 
@@ -230,7 +306,7 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
       onPointerDown={handleNodePointerDown}
       className={`absolute origin-top-left rounded-2xl shadow-lg border backdrop-blur-xl group flex flex-col transition-shadow select-none ${
         isSelected ? 'ring-2 ring-blue-500 shadow-blue-500/20' : 'border-gray-200/50'
-      } ${isLinking ? 'cursor-crosshair hover:ring-2 hover:ring-green-500' : ''}`}
+      } ${isLinking ? 'cursor-crosshair hover:ring-2 hover:ring-green-500' : ''} ${dimmed ? 'opacity-30' : ''}`}
       style={{
         x: node.x,
         y: node.y,
@@ -304,10 +380,13 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
            {node.type === 'text' && <Type size={15} />}
            {node.type === 'image' && <ImageIcon size={15} />}
            {node.type === 'link' && <Link size={15} />}
+           {node.type === 'markdown' && <FileCode2 size={15} />}
+           {node.type === 'table' && <Type size={15} />}
+           {node.type === 'chart' && <Type size={15} />}
            <span className="capitalize">{node.type}</span>
          </div>
          <div className="flex items-center gap-1.5">
-           {(node.type === 'text' || node.type === 'link') && (
+           {(node.type === 'text' || node.type === 'markdown' || node.type === 'link') && (
              <button
                onPointerDown={(e) => e.stopPropagation()}
                onClick={() => {
@@ -360,7 +439,7 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
          </div>
       </div>
 
-      <div className="p-4 pt-1 flex-1 flex flex-col min-h-[80px]">
+      <div className={`${node.type === 'table' || node.type === 'chart' ? 'p-0' : 'p-4 pt-1'} flex-1 flex flex-col min-h-[80px] overflow-hidden`}>
         {node.type === 'text' && (
           <div 
             ref={contentEditableRef}
@@ -407,6 +486,71 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
               <span className="text-gray-400 text-sm">No image</span>
             )}
           </div>
+        )}
+        {node.type === 'table' && (
+          <div
+            className="w-full h-full flex-1 overflow-hidden"
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <TableEditor
+              node={node}
+              onUpdate={onUpdate}
+              onTransactionStart={onTransactionStart}
+              onGenerateChart={() => onGenerateChart?.(node.id)}
+              generating={isGeneratingChart}
+            />
+          </div>
+        )}
+        {node.type === 'chart' && (
+          <div
+            className="w-full h-full flex-1 overflow-hidden"
+            onPointerDown={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => e.stopPropagation()}
+          >
+            <ChartNode
+              node={node}
+              onUpdate={onUpdate}
+              onTransactionStart={onTransactionStart}
+            />
+          </div>
+        )}
+        {node.type === 'markdown' && (
+          isEditing ? (
+            <textarea
+              ref={markdownRef}
+              value={markdownDraft}
+              onChange={(e) => setMarkdownDraft(e.target.value)}
+              onKeyDown={(e) => {
+                // Cmd/Ctrl+Enter 保存；Enter 走默认换行
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  handleSaveEdit();
+                }
+              }}
+              onBlur={handleSaveEdit}
+              placeholder="支持 Markdown 语法…"
+              className="w-full h-full min-h-[120px] flex-1 resize-none outline-none bg-white/50 rounded-lg p-2 text-sm leading-relaxed font-mono text-gray-700 select-text dark:bg-gray-800/60 dark:text-gray-200"
+              style={{ fontSize: node.fontSize ? `${node.fontSize}px` : 'inherit' }}
+            />
+          ) : (
+            <div
+              className="prose prose-sm prose-slate max-w-none w-full h-full overflow-y-auto custom-scrollbar outline-none cursor-text"
+              style={{ fontSize: node.fontSize ? `${node.fontSize}px` : 'inherit' }}
+              onDoubleClick={() => {
+                onTransactionStart();
+                setIsEditing(true);
+              }}
+              onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
+            >
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={markdownComponents}
+              >
+                {node.content || '*双击以输入 Markdown…*'}
+              </ReactMarkdown>
+            </div>
+          )
         )}
         {node.type === 'link' && (() => {
           const links = getLinkItems(node.content, node.url);
@@ -538,6 +682,60 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
           );
         })()}
       </div>
+
+      {/* 标签条：显示节点标签；选中时显示添加入口，标签可删除 */}
+      <div
+        className={`absolute bottom-1.5 left-3 right-8 flex flex-wrap items-center gap-1 z-20 pointer-events-none transition-opacity ${(node.tags && node.tags.length > 0) || isTagInput ? 'opacity-100' : isHovered ? 'opacity-70' : 'opacity-0'}`}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
+        {(node.tags || []).map((t) => (
+          <span key={t} className="px-1.5 py-0.5 rounded-md bg-indigo-100 text-indigo-600 text-[10px] font-medium pointer-events-auto dark:bg-indigo-500/20 dark:text-indigo-300">
+            {t}
+            {isSelected && (
+              <button onClick={() => removeTag(t)} className="ml-1 hover:text-red-500">×</button>
+            )}
+          </span>
+        ))}
+        {isTagInput ? (
+          <input
+            ref={tagInputRef}
+            autoFocus
+            value={tagDraft}
+            onChange={(e) => setTagDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter') addTag(tagDraft);
+              if (e.key === 'Escape') { setIsTagInput(false); setTagDraft(''); }
+              if (e.key === 'Backspace' && !tagDraft) { setIsTagInput(false); }
+            }}
+            onBlur={() => { if (tagDraft.trim()) addTag(tagDraft); else setIsTagInput(false); }}
+            placeholder="标签…"
+            className="w-20 px-2 py-0.5 rounded-md bg-white border border-indigo-300 text-[10px] font-medium outline-none text-indigo-600 dark:bg-gray-800 dark:text-indigo-300"
+          />
+        ) : (
+          isSelected && (
+            <button
+              onClick={() => { setTagDraft(''); setIsTagInput(true); setTimeout(() => tagInputRef.current?.focus(), 0); }}
+              className="px-1.5 py-0.5 rounded-md bg-black/5 text-gray-400 text-[10px] font-medium pointer-events-auto hover:bg-indigo-50 hover:text-indigo-500 transition-colors"
+              title="添加标签"
+            >
+              + 标签
+            </button>
+          )
+        )}
+      </div>
+
+      {/* 连线/新建 拖拽手柄：右侧垂直中点，hover 时显示 */}
+      {!isEditing && !isLinking && (isHovered || isSelected) && node.type !== 'table' && node.type !== 'chart' && (
+        <div
+          onPointerDown={(e) => onDragEdgeStart(e, node.id)}
+          className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-blue-500 border-2 border-white cursor-crosshair z-20 flex items-center justify-center transition-transform hover:scale-125"
+          style={{ boxShadow: '0 1px 6px rgba(37,99,235,0.5)' }}
+          title="拖出以连线或新建节点"
+        >
+          <span className="w-1.5 h-1.5 rounded-full bg-white" />
+        </div>
+      )}
 
       {/* Resize Handle */}
       {(!isEditing && !isLinking) && (

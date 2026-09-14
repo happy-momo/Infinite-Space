@@ -2,7 +2,7 @@
 // 负责节点/连线/页面/历史栈的增删改查，平移缩放视口、框选、快捷键、
 // 以及对接后端 API（AI 整理、AI 故事、数据持久化）。
 // Main app component — the core state machine of the infinite canvas.
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { motion, useMotionValue } from 'motion/react';
 import { CanvasNode } from './components/CanvasNode';
@@ -13,8 +13,14 @@ import { StoryControls } from './components/StoryControls';
 import { EdgeLayer } from './components/EdgeLayer';
 import { NodeData, NodeType, EdgeData, Page } from './types';
 import { initialNodes } from './data';
-import { CanvasListItem } from './components/CanvasListItem';
+import { PagesTree } from './components/PagesTree';
 import { SettingsModal } from './components/SettingsModal';
+import { SearchPanel } from './components/SearchPanel';
+import { TemplateModal } from './components/TemplateModal';
+import { AiChatPanel } from './components/AiChatPanel';
+import { TagPanel } from './components/TagPanel';
+import { SuggestPanel } from './components/SuggestPanel';
+import { Template } from './templates';
 import { useHistory } from './hooks/useHistory';
 import { Plus, Layout, ChevronUp, ChevronDown, Sun, Moon } from 'lucide-react';
 
@@ -56,8 +62,36 @@ export default function App() {
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [storyNodeId, setStoryNodeId] = useState<string | null>(null);
   const [storyBusy, setStoryBusy] = useState(false);
+  // 连线增强：从节点边缘拖拽出的预览线 + 松开后选择新节点类型
+  const [dragEdge, setDragEdge] = useState<{ sourceId: string; curX: number; curY: number } | null>(null);
+  const [dragNewMenu, setDragNewMenu] = useState<{ x: number; y: number; sourceId: string } | null>(null);
+  // 全局搜索
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  // 模板库
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+  /** 模板新建画布时的父文件夹（文件夹内新建用） */
+  const [pendingParentId, setPendingParentId] = useState<string | null>(null);
+  // AI 对话侧边栏
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  // 文件夹展开状态（UI 态，可持久化）
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  // AI 联想面板
+  const [isSuggestOpen, setIsSuggestOpen] = useState(false);
+  // 正在生成图表的表格节点 id
+  const [generatingChartId, setGeneratingChartId] = useState<string | null>(null);
+  // 标签筛选系统
+  const [selectedTags, setSelectedTags] = useState<Set<string>>(new Set());
+  const [isTagPanelOpen, setIsTagPanelOpen] = useState(false);
+  // 虚拟渲染：视口变化时触发可见节点重算
+  const [viewportTick, setViewportTick] = useState(0);
+  const [viewportSize, setViewportSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [theme, setTheme] = useState<'light' | 'dark'>(() =>
     localStorage.getItem('canvas_theme') === 'dark' ? 'dark' : 'light');
+
+  // 把主题同步到 <html>，供非 React 上下文（如图表 SVG、SW）检测暗色模式
+  useEffect(() => {
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+  }, [theme]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -293,7 +327,32 @@ export default function App() {
 
   const handleDeletePage = (e: React.MouseEvent, pageId: string) => {
     e.stopPropagation();
-    if (pages.length <= 1) {
+    const target = pages.find((p) => p.id === pageId);
+
+    // 删除文件夹：级联删除其中所有画布
+    if (target?.type === 'folder') {
+      const childIds = pages.filter((p) => p.type !== 'folder' && p.parentId === pageId).map((c) => c.id);
+      const msg = childIds.length
+        ? `删除文件夹「${target.name}」及其中的 ${childIds.length} 个画布？`
+        : `删除文件夹「${target.name}」？`;
+      if (confirm(msg)) {
+        const remaining = pages.filter((p) => p.id !== pageId && p.parentId !== pageId);
+        setPages(remaining);
+        childIds.forEach((cid) => {
+          localStorage.removeItem(`canvas_nodes_${cid}`);
+          localStorage.removeItem(`canvas_edges_${cid}`);
+          localStorage.removeItem(`canvas_viewport_${cid}`);
+        });
+        if (currentPageId === pageId || childIds.includes(currentPageId)) {
+          const firstCanvas = remaining.find((p) => p.type !== 'folder')?.id || remaining[0]?.id;
+          if (firstCanvas) setCurrentPageId(firstCanvas);
+        }
+      }
+      return;
+    }
+
+    // 仅剩一个画布时禁止删除
+    if (pages.filter((p) => p.type !== 'folder').length <= 1) {
       alert("Cannot delete the last canvas.");
       return;
     }
@@ -301,16 +360,66 @@ export default function App() {
       const nextPages = pages.filter(p => p.id !== pageId);
       setPages(nextPages);
       if (currentPageId === pageId) {
-        setCurrentPageId(nextPages[0].id);
+        setCurrentPageId(nextPages.find((p) => p.type !== 'folder')?.id || nextPages[0].id);
       }
       localStorage.removeItem(`canvas_nodes_${pageId}`);
       localStorage.removeItem(`canvas_edges_${pageId}`);
       localStorage.removeItem(`canvas_viewport_${pageId}`);
+      setExpandedFolders(prev => { const n = new Set(prev); n.delete(pageId); return n; });
     }
   };
 
   const handleRenamePage = (id: string, name: string) => {
     setPages(prev => prev.map(p => (p.id === id ? { ...p, name } : p)));
+  };
+
+  // 从模板创建画布：新建页面并预填模板节点/连线（支持放入指定文件夹）
+  const handleCreateFromTemplate = (template: Template) => {
+    const newId = Math.random().toString(36).substring(7);
+    const isBlank = template.nodes.length === 0;
+    setPages(prev => [
+      ...prev,
+      { id: newId, name: isBlank ? `Canvas ${prev.length + 1}` : template.name, type: 'canvas', parentId: pendingParentId || undefined },
+    ]);
+    if (!isBlank) {
+      localStorage.setItem(`canvas_nodes_${newId}`, JSON.stringify(template.nodes));
+      localStorage.setItem(`canvas_edges_${newId}`, JSON.stringify(template.edges));
+    }
+    setCurrentPageId(newId);
+    setNodes(template.nodes || []);
+    setEdges(template.edges || []);
+    setSelectedIds(new Set());
+    setSelectedEdgeIds(new Set());
+    setPendingParentId(null);
+    setIsTemplateModalOpen(false);
+    scheduleServerSave();
+  };
+
+  // 用模板弹窗新建画布（可选择是否放入某个文件夹）
+  const openTemplateFor = (parentId?: string) => {
+    setPendingParentId(parentId ?? null);
+    setIsTemplateModalOpen(true);
+  };
+
+  // 新建文件夹
+  const handleAddFolder = () => {
+    const id = Math.random().toString(36).substring(7);
+    setPages(prev => [...prev, { id, name: `文件夹 ${prev.filter((p) => p.type === 'folder').length + 1}`, type: 'folder' }]);
+    setExpandedFolders(prev => new Set(prev).add(id));
+  };
+
+  // 拖拽把页面移入/移出文件夹
+  const handleMovePage = (pageId: string, targetFolderId: string | null) => {
+    setPages(prev => prev.map(p => (p.id === pageId ? { ...p, parentId: targetFolderId || undefined } : p)));
+  };
+
+  const handleToggleExpand = (folderId: string) => {
+    setExpandedFolders(prev => {
+      const next = new Set(prev);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
   };
 
   useEffect(() => {
@@ -359,7 +468,58 @@ export default function App() {
     };
 
     el.addEventListener('wheel', handleWheel, { passive: false });
-    return () => el.removeEventListener('wheel', handleWheel);
+
+    // 双指缩放（pinch to zoom）
+    let pinchActive = false;
+    let pinchStartDist = 0;
+    let pinchStartScale = 1;
+    let pinchCenter = { x: 0, y: 0 };
+
+    const dist = (t1: Touch, t2: Touch) =>
+      Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length !== 2) return;
+      pinchActive = true;
+      pinchStartDist = dist(e.touches[0], e.touches[1]);
+      pinchStartScale = scale.get();
+      const rect = el.getBoundingClientRect();
+      pinchCenter = {
+        x: (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left,
+        y: (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top,
+      };
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (!pinchActive || e.touches.length !== 2) return;
+      e.preventDefault();
+      const d = dist(e.touches[0], e.touches[1]);
+      const ratio = d / pinchStartDist;
+      let newScale = Math.max(0.1, Math.min(5, pinchStartScale * ratio));
+      const curX = x.get();
+      const curY = y.get();
+      const scaleRatio = newScale / pinchStartScale;
+      const newX = pinchCenter.x - (pinchCenter.x - curX) * scaleRatio;
+      const newY = pinchCenter.y - (pinchCenter.y - curY) * scaleRatio;
+      scale.set(newScale);
+      x.set(newX);
+      y.set(newY);
+    };
+
+    const onTouchEnd = () => { pinchActive = false; };
+
+    el.addEventListener('touchstart', onTouchStart, { passive: false });
+    el.addEventListener('touchmove', onTouchMove, { passive: false });
+    el.addEventListener('touchend', onTouchEnd);
+    el.addEventListener('touchcancel', onTouchEnd);
+
+    return () => {
+      el.removeEventListener('wheel', handleWheel);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('touchend', onTouchEnd);
+      el.removeEventListener('touchcancel', onTouchEnd);
+    };
   }, [x, y, scale]);
 
   const handleAddNode = (type: NodeType) => {
@@ -370,21 +530,64 @@ export default function App() {
     const addX = (screenCenterX - x.get()) / scale.get();
     const addY = (screenCenterY - y.get()) / scale.get();
 
+    const defaultContent =
+      type === 'image' ? '' : type === 'link' ? 'https://example.com'
+      : type === 'markdown' ? '# 新 Markdown 节点\n\n支持 **加粗**、`代码`、列表、表格等语法。双击编辑。'
+      : type === 'table' ? ''
+      : type === 'chart' ? ''
+      : '';
+
     const newNode: NodeData = {
       id: Math.random().toString(36).substring(7),
       type,
       x: addX - 150,
       y: addY - 100,
-      content: type === 'image' ? '' : type === 'link' ? 'https://example.com' : '',
+      content: defaultContent,
       color: 'rgba(255, 255, 255, 0.95)',
-      width: type === 'image' ? 400 : 300,
-      height: type === 'image' ? 300 : undefined,
+      width: type === 'image' ? 400 : type === 'markdown' ? 420 : type === 'table' ? 480 : 300,
+      height: type === 'image' ? 300 : type === 'markdown' ? 320 : type === 'table' ? 360 : undefined,
       zIndex: maxZ + 1
     };
     setMaxZ(prev => prev + 1);
     setNodes(prev => [...prev, newNode]);
     setIsLinking(false);
     setLinkSource(null);
+  };
+
+  // AI 面板生成/插入一个节点
+  const handleInsertAiNode = (type: NodeType, content: string) => {
+    beginTransaction();
+    const addX = (window.innerWidth / 2 - x.get()) / scale.get();
+    const addY = (window.innerHeight / 2 - y.get()) / scale.get();
+    const newNode: NodeData = {
+      id: Math.random().toString(36).substring(7),
+      type,
+      x: addX + 20,
+      y: addY + 120,
+      content,
+      color: 'rgba(255,255,255,0.95)',
+      width: type === 'markdown' ? 420 : 300,
+      height: type === 'markdown' ? 320 : undefined,
+      zIndex: maxZ + 1,
+    };
+    setMaxZ((prev) => prev + 1);
+    setNodes((prev) => [...prev, newNode]);
+    setSelectedIds(new Set([newNode.id]));
+    setSelectedEdgeIds(new Set());
+  };
+
+  // 标签筛选：多选 AND 匹配；__clear__ 清除
+  const handleToggleTag = (tag: string) => {
+    if (tag === '__clear__') {
+      setSelectedTags(new Set());
+      return;
+    }
+    setSelectedTags((prev) => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag);
+      else next.add(tag);
+      return next;
+    });
   };
 
   const handleRemoveNode = (id: string) => {
@@ -459,6 +662,76 @@ export default function App() {
   const toggleLinking = () => {
     setIsLinking(!isLinking);
     setLinkSource(null);
+  };
+
+  // AI 联想：当前选中的第一个节点作为联想源
+  const suggestSourceNode =
+    selectedIds.size === 1 ? nodes.find((n) => n.id === Array.from(selectedIds)[0]) || null : null;
+
+  // 联想面板里点「连线」→ 直接给源节点和目标节点加一条连线
+  const handleConnectFromSuggest = (targetId: string) => {
+    if (!suggestSourceNode) return;
+    beginTransaction();
+    setEdges((prev) => [
+      ...prev,
+      { id: Math.random().toString(36).substring(7), source: suggestSourceNode.id, target: targetId, directed: true },
+    ]);
+  };
+
+  // ---- 连线增强：从节点边缘拖出预览线，松开时连线或新建节点 ----
+  const ptInside = useCallback((pt: { wx: number; wy: number }, n: NodeData) => {
+    const w = n.width || (n.type === 'image' ? 400 : 300);
+    const h = n.height || (n.type === 'image' ? 300 : n.type === 'markdown' ? 320 : 200);
+    return pt.wx >= n.x && pt.wx <= n.x + w && pt.wy >= n.y && pt.wy <= n.y + h;
+  }, []);
+
+  const handleDragEdgeStart = (e: React.PointerEvent, sourceId: string) => {
+    if (isLinking) return;
+    e.stopPropagation();
+    beginTransaction();
+    const toWorld = (cx: number, cy: number) => ({ wx: (cx - x.get()) / scale.get(), wy: (cy - y.get()) / scale.get() });
+    const start = toWorld(e.clientX, e.clientY);
+    setDragEdge({ sourceId, curX: start.wx, curY: start.wy });
+
+    const onMove = (mv: PointerEvent) => {
+      const cur = toWorld(mv.clientX, mv.clientY);
+      setDragEdge({ sourceId, curX: cur.wx, curY: cur.wy });
+    };
+    const onUp = (up: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      const pt = toWorld(up.clientX, up.clientY);
+      const hit = nodes.find((n) => n.id !== sourceId && ptInside(pt, n));
+      setDragEdge(null);
+      if (hit) {
+        // 落在另一节点上 → 直接建立连线
+        setEdges(prev => [...prev, { id: Math.random().toString(36).substring(7), source: sourceId, target: hit.id, directed: true }]);
+      } else {
+        // 落在空白 → 弹出节点类型选择，创建新节点并连线
+        setDragNewMenu({ x: pt.wx, y: pt.wy, sourceId });
+      }
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const createConnectedNode = (type: NodeType) => {
+    if (!dragNewMenu) return;
+    const { x: nx, y: ny, sourceId } = dragNewMenu;
+    const id = Math.random().toString(36).substring(7);
+    const defaultContent =
+      type === 'link' ? 'https://example.com'
+      : type === 'markdown' ? '# 新节点'
+      : type === 'image' ? '' : '';
+    setNodes(prev => [...prev, {
+      id, type, x: nx - 75, y: ny - 40, content: defaultContent,
+      color: 'rgba(255,255,255,0.95)',
+      width: type === 'image' ? 400 : 300, height: type === 'image' ? 300 : undefined,
+      zIndex: maxZ + 1,
+    }]);
+    setEdges(prev => [...prev, { id: Math.random().toString(36).substring(7), source: sourceId, target: id, directed: true }]);
+    setMaxZ(prev => prev + 1);
+    setDragNewMenu(null);
   };
 
   const handleDeleteSelected = (confirmIfEmpty: boolean = true) => {
@@ -602,6 +875,18 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   });
 
+  // Cmd/Ctrl+F 打开全局搜索
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setIsSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // Space = temporary pan modifier (left-drag on empty space now selects).
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -650,6 +935,49 @@ export default function App() {
     y.set(window.innerHeight / 2 - cy * fitScale);
     scale.set(fitScale);
   };
+
+  // 聚焦到单个节点：把视口移向该节点中心并选中它（搜索 / AI 联想共用）
+  const focusNode = (id: string) => {
+    const n = nodes.find((x) => x.id === id);
+    if (!n) return;
+    const w = n.width || (n.type === 'image' ? 400 : 300);
+    const h = n.height || (n.type === 'image' ? 300 : n.type === 'markdown' ? 320 : 200);
+    const cx = n.x + w / 2;
+    const cy = n.y + h / 2;
+    const s = scale.get();
+    x.set(window.innerWidth / 2 - cx * s);
+    y.set(window.innerHeight / 2 - cy * s);
+    setSelectedIds(new Set([id]));
+    setSelectedEdgeIds(new Set());
+  };
+
+  // 订阅视口变化（motion value 不触发 re-render）与窗口尺寸，驱动虚拟渲染重算
+  useEffect(() => {
+    const tick = () => setViewportTick((t) => t + 1);
+    const onResize = () => { setViewportSize({ w: window.innerWidth, h: window.innerHeight }); tick(); };
+    const unsubs = [x, y, scale].map((mv) => mv.on('change', tick));
+    window.addEventListener('resize', onResize);
+    return () => { unsubs.forEach((u) => u()); window.removeEventListener('resize', onResize); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // 视口剔除：只渲染视口（含外延）内的节点，支撑千级节点流畅度
+  const visibleNodes = useMemo(() => {
+    const mx = x.get();
+    const my = y.get();
+    const ms = scale.get() || 1;
+    const margin = 300;
+    const x0 = (-mx) / ms - margin / ms;
+    const y0 = (-my) / ms - margin / ms;
+    const x1 = (viewportSize.w - mx) / ms + margin / ms;
+    const y1 = (viewportSize.h - my) / ms + margin / ms;
+    return nodes.filter((n) => {
+      const w = n.width || (n.type === 'image' ? 400 : n.type === 'table' || n.type === 'chart' ? 480 : n.type === 'markdown' ? 420 : 300);
+      const h = n.height || (n.type === 'image' ? 300 : n.type === 'table' ? 360 : n.type === 'markdown' ? 320 : 200);
+      return n.x < x1 && n.x + w > x0 && n.y < y1 && n.y + h > y0;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodes, viewportTick, viewportSize]);
 
   const handleAiOrganize = async () => {
     setIsOrganizing(true);
@@ -811,6 +1139,60 @@ export default function App() {
     fitViewport(nodes.map((n) => ({ id: n.id, x: n.x, y: n.y })));
   };
 
+  // ---- AI 生成图表：读取表格数据 → /api/llm/chart → 在表格右侧创建 chart 节点 ----
+  const handleGenerateChart = async (tableNodeId: string) => {
+    const table = nodes.find((n) => n.id === tableNodeId);
+    if (!table || !table.tableData || table.tableData.length < 2) {
+      alert('表格至少需要表头 + 一行数据才能生成图表');
+      return;
+    }
+    setGeneratingChartId(tableNodeId);
+    try {
+      // TableCell[][] → string[][]
+      const rows = table.tableData.map((row) => row.map((c) => c.text));
+      const response = await fetch('/api/llm/chart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows }),
+      });
+      const data = await response.json();
+      if (response.ok && Array.isArray(data.data) && data.data.length > 0) {
+        beginTransaction();
+        const tw = table.width || 480;
+        const chartNode: NodeData = {
+          id: Math.random().toString(36).substring(7),
+          type: 'chart',
+          x: table.x + tw + 60,
+          y: table.y,
+          content: '',
+          color: 'rgba(255, 255, 255, 0.95)',
+          width: 480,
+          height: 360,
+          zIndex: maxZ + 1,
+          chartConfig: {
+            chartType: data.chartType,
+            sourceTableId: tableNodeId,
+            title: data.title,
+            xAxis: data.xAxis,
+            yAxis: data.yAxis,
+            data: data.data,
+          },
+        };
+        setMaxZ((prev) => prev + 1);
+        setNodes((prev) => [...prev, chartNode]);
+        setSelectedIds(new Set([chartNode.id]));
+        setSelectedEdgeIds(new Set());
+      } else {
+        alert(data.error || 'AI 生成图表失败');
+      }
+    } catch (e) {
+      console.error(e);
+      alert('AI 生成图表失败，请检查服务与 LLM 配置');
+    } finally {
+      setGeneratingChartId(null);
+    }
+  };
+
   const handleAiSummarize = async () => {
     setIsSummarizing(true);
     try {
@@ -928,11 +1310,12 @@ export default function App() {
       >
         <div className="absolute top-[-50000px] left-[-50000px] w-[100000px] h-[100000px] canvas-bg pointer-events-none" />
 
-        <EdgeLayer 
-          nodes={nodes} 
-          edges={edges} 
+        <EdgeLayer
+          nodes={nodes}
+          edges={edges}
           selectedEdgeIds={selectedEdgeIds}
           onSelectEdge={handleSelectEdge}
+          dragEdge={dragEdge}
         />
 
         {marquee && (
@@ -948,20 +1331,29 @@ export default function App() {
         )}
 
         <div className="absolute inset-0 pointer-events-none *:pointer-events-auto">
-          {nodes.map(node => (
-            <CanvasNode
-              key={node.id}
-              node={node}
-              onRemove={handleRemoveNode}
-              onUpdate={handleUpdateNode}
-              bringToFront={handleBringToFront}
-              isSelected={selectedIds.has(node.id)}
-              onSelect={handleSelectNode}
-              isLinking={isLinking}
-              onLinkClick={handleLinkClick}
-              onTransactionStart={beginTransaction}
-            />
-          ))}
+          {visibleNodes.map(node => {
+            // 标签筛选：非空筛选时，不匹配的节点淡化
+            const dimmed = selectedTags.size > 0 &&
+              !(Array.from(selectedTags).every(t => (node.tags || []).includes(t)));
+            return (
+              <CanvasNode
+                key={node.id}
+                node={node}
+                onRemove={handleRemoveNode}
+                onUpdate={handleUpdateNode}
+                bringToFront={handleBringToFront}
+                isSelected={selectedIds.has(node.id)}
+                onSelect={handleSelectNode}
+                isLinking={isLinking}
+                onLinkClick={handleLinkClick}
+                onTransactionStart={beginTransaction}
+                onDragEdgeStart={handleDragEdgeStart}
+                dimmed={dimmed}
+                onGenerateChart={handleGenerateChart}
+                isGeneratingChart={generatingChartId === node.id}
+              />
+            );
+          })}
         </div>
       </motion.div>
 
@@ -973,43 +1365,59 @@ export default function App() {
         onReset={handleResetView}
       />
 
-      {/* Pages Panel */}
-      <div className="fixed bottom-8 left-8 flex flex-col items-start gap-2 z-50">
-        <button 
-          onClick={() => setIsPagesOpen(!isPagesOpen)}
-          className="flex items-center gap-2 mb-1 px-3 py-2 bg-white/80 backdrop-blur-md rounded-xl text-gray-700 font-medium text-xs uppercase tracking-wider shadow-sm border border-black/5 hover:bg-white transition-colors dark:bg-gray-900/80 dark:border-white/10 dark:text-gray-300 dark:hover:bg-gray-800"
+      {isSearchOpen && (
+        <SearchPanel
+          nodes={nodes}
+          selectedNodeIds={selectedIds}
+          onClose={() => setIsSearchOpen(false)}
+          onFocusNode={focusNode}
+        />
+      )}
+
+      {/* 松开拖拽线到空白处 → 选择新节点类型 */}
+      {dragNewMenu && (
+        <div
+          className="fixed z-[70] flex items-center gap-1 p-1.5 bg-white/95 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.12)] rounded-2xl dark:bg-gray-900/95 dark:border-white/10"
+          style={{
+            left: dragNewMenu.x * scale.get() + x.get() - 180,
+            top: dragNewMenu.y * scale.get() + y.get() - 24,
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
         >
-          <Layout size={14} /> Canvases {isPagesOpen ? <ChevronDown size={14}/> : <ChevronUp size={14}/>}
-        </button>
-        
-        {isPagesOpen && (
-          <>
-            <div className="flex flex-col gap-2 max-h-[300px] overflow-y-auto pr-2 custom-scrollbar">
-              {pages.map(p => (
-                <CanvasListItem
-                  key={p.id}
-                  page={p}
-                  isActive={currentPageId === p.id}
-                  canDelete={pages.length > 1}
-                  onSwitch={setCurrentPageId}
-                  onRename={handleRenamePage}
-                  onDelete={handleDeletePage}
-                />
-              ))}
-            </div>
+          <span className="px-2 text-[11px] text-gray-400 whitespace-nowrap">新节点</span>
+          {(['text', 'markdown', 'link', 'image'] as NodeType[]).map((t) => (
             <button
-              onClick={() => {
-                const newId = Math.random().toString(36).substring(7);
-                setPages(prev => [...prev, { id: newId, name: `Canvas ${prev.length + 1}` }]);
-                setCurrentPageId(newId);
-              }}
-              className="mt-2 w-40 px-4 py-2 rounded-xl bg-black/5 hover:bg-black/10 text-gray-600 text-sm font-medium transition-colors flex items-center justify-center gap-1.5 border border-transparent hover:border-black/5 dark:bg-white/10 dark:hover:bg-white/15 dark:text-gray-300"
+              key={t}
+              onClick={() => createConnectedNode(t)}
+              className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-gray-700 hover:bg-blue-50 hover:text-blue-600 transition-colors capitalize dark:text-gray-300 dark:hover:bg-blue-500/20 dark:hover:text-blue-300"
             >
-              <Plus size={16} /> New Canvas
+              {t}
             </button>
-          </>
-        )}
-      </div>
+          ))}
+          <div className="w-px h-5 bg-gray-200 mx-1 dark:bg-white/10" />
+          <button
+            onClick={() => setDragNewMenu(null)}
+            className="px-2 py-1 rounded-lg text-xs text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors dark:hover:bg-white/10"
+          >
+            取消
+          </button>
+        </div>
+      )}
+
+      {/* Pages Tree（文件夹 → 画布 两层结构） */}
+      <PagesTree
+        pages={pages}
+        currentPageId={currentPageId}
+        isOpen={isPagesOpen}
+        onToggle={() => setIsPagesOpen((o) => !o)}
+        expanded={expandedFolders}
+        onToggleExpand={handleToggleExpand}
+        onSwitch={setCurrentPageId}
+        onAddPage={openTemplateFor}
+        onAddFolder={handleAddFolder}
+        onMovePage={handleMovePage}
+        onDelete={handleDeletePage}
+      />
 
       <button
         onClick={() =>
@@ -1029,6 +1437,13 @@ export default function App() {
         onAdd={handleAddNode}
         isLinking={isLinking}
         onToggleLink={toggleLinking}
+        onToggleChat={() => setIsChatOpen((o) => !o)}
+        isChatOpen={isChatOpen}
+        onToggleSearch={() => setIsSearchOpen((o) => !o)}
+        onToggleTagPanel={() => setIsTagPanelOpen((o) => !o)}
+        isTagPanelOpen={isTagPanelOpen}
+        onToggleSuggest={() => setIsSuggestOpen((o) => !o)}
+        hasSingleSelection={selectedIds.size === 1}
         onAiOrganize={handleAiOrganize}
         isOrganizing={isOrganizing}
         onAiSummarize={handleAiSummarize}
@@ -1059,6 +1474,38 @@ export default function App() {
       )}
 
       <SettingsModal open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+
+      <TemplateModal
+        open={isTemplateModalOpen}
+        onClose={() => setIsTemplateModalOpen(false)}
+        onSelect={handleCreateFromTemplate}
+      />
+
+      <AiChatPanel
+        open={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+        nodes={nodes}
+        edges={edges}
+        currentPageName={pages.find((p) => p.id === currentPageId)?.name || ''}
+        onInsertNode={handleInsertAiNode}
+      />
+
+      <TagPanel
+        open={isTagPanelOpen}
+        onClose={() => setIsTagPanelOpen(false)}
+        nodes={nodes}
+        selectedTags={selectedTags}
+        onToggleTag={handleToggleTag}
+      />
+
+      <SuggestPanel
+        open={isSuggestOpen}
+        onClose={() => setIsSuggestOpen(false)}
+        sourceNode={suggestSourceNode}
+        nodes={nodes}
+        onFocus={focusNode}
+        onConnect={handleConnectFromSuggest}
+      />
 
       <input
         ref={importInputRef}

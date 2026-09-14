@@ -17,7 +17,8 @@ export interface ViewportState {
 }
 
 export interface AppState {
-  pages: { id: string; name: string }[];
+  // Page 结构与前端 src/types.ts 保持一致；type/parentId 可选，向后兼容。
+  pages: { id: string; name: string; type?: 'folder' | 'canvas'; parentId?: string }[];
   currentPageId: string;
   nodes: Record<string, unknown[]>;
   edges: Record<string, unknown[]>;

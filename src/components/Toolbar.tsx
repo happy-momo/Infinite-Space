@@ -3,13 +3,20 @@
 // Bottom toolbar — node creation, undo/redo, linking, AI actions, import/export and settings.
 import React from 'react';
 import { motion } from 'motion/react';
-import { Type, Image as ImageIcon, Link, Sparkles, Link2, Trash2, Settings, BookOpenText, Undo2, Redo2, Download, Upload } from 'lucide-react';
+import { Type, Image as ImageIcon, Link, Sparkles, Link2, Trash2, Settings, BookOpenText, Undo2, Redo2, Download, Upload, FileCode2, MessageSquare, Tag, Lightbulb, Table2 } from 'lucide-react';
 import { NodeType } from '../types';
 
 interface Props {
   onAdd: (type: NodeType) => void;
   isLinking: boolean;
   onToggleLink: () => void;
+  onToggleChat: () => void;
+  isChatOpen: boolean;
+  onToggleSearch: () => void;
+  onToggleTagPanel: () => void;
+  isTagPanelOpen: boolean;
+  onToggleSuggest: () => void;
+  hasSingleSelection?: boolean;
   onAiOrganize: () => void;
   isOrganizing: boolean;
   onAiSummarize: () => void;
@@ -25,17 +32,20 @@ interface Props {
   onImport: () => void;
 }
 
-export function Toolbar({ onAdd, isLinking, onToggleLink, onAiOrganize, isOrganizing, onAiSummarize, isSummarizing, onClear, hasSelection, onOpenSettings, onUndo, onRedo, canUndo, canRedo, onExport, onImport }: Props) {
+export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOpen, onToggleSearch, onToggleTagPanel, isTagPanelOpen, onToggleSuggest, hasSingleSelection, onAiOrganize, isOrganizing, onAiSummarize, isSummarizing, onClear, hasSelection, onOpenSettings, onUndo, onRedo, canUndo, canRedo, onExport, onImport }: Props) {
   return (
     <motion.div
       initial={{ y: 100, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ type: "spring", stiffness: 200, damping: 20, delay: 0.2 }}
-      className="fixed bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-2 p-2 bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl z-50 dark:bg-gray-900/80 dark:border-white/10"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 md:bottom-8 flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 max-w-[95vw] overflow-x-auto custom-scrollbar bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl z-50 dark:bg-gray-900/80 dark:border-white/10"
     >
       <ToolButton icon={<Type size={20} />} label="Text" onClick={() => onAdd('text')} />
       <ToolButton icon={<ImageIcon size={20} />} label="Image" onClick={() => onAdd('image')} />
       <ToolButton icon={<Link size={20} />} label="Link" onClick={() => onAdd('link')} />
+      <ToolButton icon={<FileCode2 size={20} />} label="Markdown" onClick={() => onAdd('markdown')} />
+      <ToolButton icon={<Table2 size={20} />} label="Table" onClick={() => onAdd('table')} />
+      <ToolButton icon={<MessageSquare size={20} />} label={isChatOpen ? 'Close AI Chat' : 'AI Chat'} onClick={onToggleChat} active={isChatOpen} activeColor="text-emerald-600 bg-emerald-50" />
 
       <div className="w-px h-6 bg-gray-200 mx-2 dark:bg-white/10" />
 
@@ -51,10 +61,25 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onAiOrganize, isOrgani
         active={isLinking}
         activeColor="text-blue-500 bg-blue-50"
       />
-      
+
+      <ToolButton
+        icon={<Tag size={20} />}
+        label="标签面板"
+        onClick={onToggleTagPanel}
+        active={isTagPanelOpen}
+        activeColor="text-indigo-600 bg-indigo-50"
+      />
+      <ToolButton
+        icon={<Lightbulb size={20} />}
+        label="AI 联想"
+        onClick={onToggleSuggest}
+        disabled={!hasSingleSelection}
+        activeColor="text-fuchsia-600 bg-fuchsia-50"
+      />
+
       <div className="w-px h-6 bg-gray-200 mx-2 dark:bg-white/10" />
 
-      <button 
+      <button
         onClick={onAiOrganize}
         disabled={isOrganizing}
         className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-500 text-white font-medium text-sm hover:opacity-90 transition-opacity shadow-sm disabled:opacity-50"
