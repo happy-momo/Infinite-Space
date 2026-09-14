@@ -50,7 +50,8 @@
 
 ## 📸 Screenshots
 
-<img width="1920" height="953" alt="image" src="https://github.com/user-attachments/assets/fc9a62b7-f67e-4f9e-9477-b07df06f7388" />
+<img width="1892" height="891" alt="infinite" src="https://github.com/user-attachments/assets/d5a236d2-d8ba-41c4-b0e9-eb4c2facc5ed" />
+
 
 
 ## 🚀 Quick Start
