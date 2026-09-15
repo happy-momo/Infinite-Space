@@ -780,3 +780,108 @@ ${listText}
 
   return { relations };
 }
+// ---- AI 生成画布（把一段文字描述解构成节点 + 连线）----
+export interface GeneratedNode {
+  type: 'text' | 'markdown';
+  title?: string;
+  content: string;
+}
+export interface GeneratedEdge {
+  from: number;
+  to: number;
+  label?: string;
+}
+export interface GeneratedBoard {
+  title?: string;
+  nodes: GeneratedNode[];
+  edges: GeneratedEdge[];
+}
+
+export async function generateBoard(
+  cfg: LlmConfig,
+  description: string,
+  maxNodes: number = 30,
+  context?: { pageName?: string; titles?: string[] },
+): Promise<GeneratedBoard> {
+  const desc = String(description || '').trim();
+  if (!desc) throw new LlmError('描述不能为空');
+
+  const system = 'You are a canvas content designer. Return ONLY a valid JSON object. No markdown, no explanation.';
+  const user = `
+你是「无限画布」的内容解构器。用户会输入一段文字/想法描述，请把它拆解成一组概念节点，并标注节点之间的关系连线，供自动排版到无限画布上。
+
+拆解规则：
+1. 从描述中提取 ${maxNodes} 个以内（最少 3 个）关键概念、条目、观点或事实，每个成为一个节点。信息量大就多拆，量小就少拆。
+2. 每个节点给一个短标题（title，不超过 12 字）和一段要点式内容（content，要点化、保留关键细节，不超过 120 字；普通要点/一句话用 text，需要列表/代码/小组件结构时用 markdown）。
+3. type 只允许 "text" 或 "markdown"。
+4. 用节点数组的索引表达关系（from/to，从 0 开始）：包含、因果、步骤、递进、举例、对比、相关等。为每条连线给一个简短关系标签（label，不超过 10 字），如「包含」「因果」「步骤」「举例」「对比」。不要产生自身环，避免重复连线。
+5. 若存在一个核心主题，请在顶层给出 title（看板主题，不超过 20 字）。
+
+【重要】当用户的描述只是一句"帮我创作/设计/生成一个画布或看板"这类创建请求、而没有具体内容时：
+- 请发挥创意，自主构思一个有意义、可落地的看板主题，再按上面规则为这个自创主题拆出节点和连线；不要返回空，也不要报错。
+- 优先从当前看板已有主题延伸（见下方"当前看板参考"，若能基于其中某个主题创作会更贴合）；否则自创新主题。
+- 这属于创作场景，允许合理构思；但若描述里含有需要忠实转述的具体文字内容，则仍须忠于原文、不要编造。
+
+当前看板参考（可选，创作无明确主题时可借鉴）：
+页面「${context?.pageName || '未命名'}」；已有节点标题：${(context?.titles || []).slice(0, 15).join('、') || '（无）'}
+
+用户的描述/请求：
+${desc.slice(0, 12000)}
+
+只返回 JSON，不要任何多余文字，格式：
+{"title":"主题","nodes":[{"type":"text","title":"短标题","content":"要点内容"}],"edges":[{"from":0,"to":1,"label":"关系"}]}
+`;
+
+  let text = await callLlm(cfg, system, user);
+  let parsed: unknown;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    text = await callLlm(cfg, system, `${user}\n\n你上一次的输出不是合法 JSON。请只输出上述 JSON 格式，不要任何多余内容。`);
+    parsed = extractJson(text);
+  }
+
+  const raw = parsed as any;
+  const title = typeof raw?.title === 'string' ? raw.title.replace(/["“”‘’《》]/g, '').trim().slice(0, 40) : '';
+
+  const rawNodes = Array.isArray(raw?.nodes) ? raw.nodes : [];
+  const nodes: GeneratedNode[] = [];
+  for (const n of rawNodes) {
+    if (!n || typeof n !== 'object') continue;
+    const content = typeof n.content === 'string' ? n.content.trim() : '';
+    if (!content) continue;
+    const type = n.type === 'markdown' ? 'markdown' : 'text';
+    nodes.push({
+      type,
+      content: content.slice(0, 400),
+      title: typeof n.title === 'string' ? n.title.trim().slice(0, 30) : undefined,
+    });
+    if (nodes.length >= maxNodes) break;
+  }
+  if (nodes.length === 0) {
+    throw new LlmError('模型未能从描述中解构出有效节点，请换一种描述方式再试');
+  }
+
+  // 关系连线：索引必须在合法范围内、非自环、去重。
+  const seen = new Set<string>();
+  const edges: GeneratedEdge[] = [];
+  const rawEdges = Array.isArray(raw?.edges) ? raw.edges : [];
+  for (const e of rawEdges) {
+    if (!e || typeof e !== 'object') continue;
+    let from = Number(e.from ?? NaN);
+    let to = Number(e.to ?? NaN);
+    if (!Number.isInteger(from) || !Number.isInteger(to)) continue;
+    if (from < 0 || to < 0 || from >= nodes.length || to >= nodes.length || from === to) continue;
+    const key = `${from}:${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({
+      from,
+      to,
+      label: typeof e.label === 'string' ? e.label.trim().slice(0, 10) : undefined,
+    });
+    if (edges.length >= 200) break;
+  }
+
+  return { title, nodes, edges };
+}

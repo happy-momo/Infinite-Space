@@ -2,7 +2,7 @@
 // Minimap — overview of the whole canvas; click or drag to teleport the viewport.
 import { motion, MotionValue } from "motion/react";
 import { NodeData } from "../types";
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 interface Props {
   nodes: NodeData[];
@@ -11,9 +11,16 @@ interface Props {
   scale: MotionValue<number>;
 }
 
-export function Minimap({ nodes, x, y, scale }: Props) {
+export const Minimap = memo(function Minimap({ nodes, x, y, scale }: Props) {
   const [viewState, setViewState] = useState({ x: x.get(), y: y.get(), s: scale.get() });
   const pendingRef = useRef({ x: x.get(), y: y.get(), s: scale.get() });
+  // 节点点阵也用 RAF 合帧：拖拽时 setNodes 每秒数十次，这里合到 ≤60fps 再重绘点阵。
+  const [minimapNodes, setMinimapNodes] = useState(nodes);
+  useEffect(() => {
+    let raf = 0;
+    raf = requestAnimationFrame(() => setMinimapNodes(nodes));
+    return () => cancelAnimationFrame(raf);
+  }, [nodes]);
 
   // 性能：把高频的 pan/zoom change 事件合帧到下一帧再更新，避免以 60fps 触发 React 渲染。
   useEffect(() => {
@@ -36,35 +43,33 @@ export function Minimap({ nodes, x, y, scale }: Props) {
     };
   }, [x, y, scale]);
 
-  // Map limits
-  let minX = 0, minY = 0, maxX = 0, maxY = 0;
-  nodes.forEach(n => {
-    if (n.x < minX) minX = n.x;
-    if (n.y < minY) minY = n.y;
-    if (n.x + (n.width || 300) > maxX) maxX = n.x + (n.width || 300);
-    if (n.y + 300 > maxY) maxY = n.y + 300;
-  });
+  // Map limits（含点阵与视口），只在点阵或视口变化时重算。
+  const layout = useMemo(() => {
+    let minX = 0, minY = 0, maxX = 0, maxY = 0;
+    for (const n of minimapNodes) {
+      if (n.x < minX) minX = n.x;
+      if (n.y < minY) minY = n.y;
+      if (n.x + (n.width || 300) > maxX) maxX = n.x + (n.width || 300);
+      if (n.y + 300 > maxY) maxY = n.y + 300;
+    }
+    // Include current viewport in calculation
+    const viewportWidth = typeof window !== 'undefined' ? window.innerWidth / viewState.s : 1000;
+    const viewportHeight = typeof window !== 'undefined' ? window.innerHeight / viewState.s : 1000;
+    const vx = -viewState.x / viewState.s;
+    const vy = -viewState.y / viewState.s;
+    if (vx < minX) minX = vx;
+    if (vy < minY) minY = vy;
+    if (vx + viewportWidth > maxX) maxX = vx + viewportWidth;
+    if (vy + viewportHeight > maxY) maxY = vy + viewportHeight;
+    // Add padding
+    minX -= 500; minY -= 500; maxX += 500; maxY += 500;
+    const totalWidth = maxX - minX;
+    const totalHeight = maxY - minY;
+    const minimapScale = 150 / Math.max(totalWidth, totalHeight);
+    return { minX, minY, minimapScale, viewportWidth, viewportHeight, vx, vy };
+  }, [minimapNodes, viewState]);
 
-  // Include current viewport in calculation
-  const viewportWidth = typeof window !== 'undefined' ? window.innerWidth / viewState.s : 1000;
-  const viewportHeight = typeof window !== 'undefined' ? window.innerHeight / viewState.s : 1000;
-  
-  const vx = -viewState.x / viewState.s;
-  const vy = -viewState.y / viewState.s;
-
-  if (vx < minX) minX = vx;
-  if (vy < minY) minY = vy;
-  if (vx + viewportWidth > maxX) maxX = vx + viewportWidth;
-  if (vy + viewportHeight > maxY) maxY = vy + viewportHeight;
-
-  // Add padding
-  minX -= 500; minY -= 500; maxX += 500; maxY += 500;
-
-  const totalWidth = maxX - minX;
-  const totalHeight = maxY - minY;
-
-  const minimapSize = 150;
-  const minimapScale = minimapSize / Math.max(totalWidth, totalHeight);
+  const { minX, minY, minimapScale, viewportWidth, viewportHeight, vx, vy } = layout;
 
   const handlePointerDown = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -101,13 +106,13 @@ export function Minimap({ nodes, x, y, scale }: Props) {
       className="fixed bottom-8 right-8 w-[150px] h-[150px] bg-white/80 backdrop-blur-md border border-black/10 rounded-2xl shadow-lg overflow-hidden z-50 cursor-pointer dark:bg-gray-900/80 dark:border-white/10"
       onPointerDown={handlePointerDown}
     >
-      <div 
+      <div
         className="absolute"
         style={{
           transform: `translate(${-minX * minimapScale}px, ${-minY * minimapScale}px)`
         }}
       >
-        {nodes.map(n => (
+        {minimapNodes.map(n => (
           <div
             key={n.id}
             className="absolute bg-indigo-500/50 rounded-sm border border-indigo-600/50"
@@ -132,4 +137,4 @@ export function Minimap({ nodes, x, y, scale }: Props) {
       </div>
     </div>
   );
-}
+});

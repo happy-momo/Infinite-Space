@@ -3,9 +3,8 @@
 // 支持箭头（directed）、连线标签文字、选中高亮，以及"从节点边缘拖出"的预览线。
 // Edge layer — bezier connections in world coords. Endpoints attach to the node PERIMETER
 // (not center) so lines and arrowheads stay visible above the node boxes.
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import { NodeData, EdgeData } from '../types';
-import { motion } from 'motion/react';
 
 interface Props {
   nodes: NodeData[];
@@ -40,6 +39,39 @@ const rectBorder = (cx: number, cy: number, halfW: number, halfH: number, dx: nu
 };
 
 export const EdgeLayer = memo(function EdgeLayer({ nodes, edges, selectedEdgeIds, onSelectEdge, dragEdge }: Props) {
+  // 索引 O(N)→O(1) 查找端点；每条边的路径/标签几何只在「nodes/edges」变化时重算，
+  // 选中态变化（仅改 stroke 颜色）不触发几何重算。
+  const byId = useMemo(() => new Map(nodes.map((n) => [n.id, n])), [nodes]);
+  const geometry = useMemo(
+    () =>
+      edges
+        .map((edge) => {
+          const source = byId.get(edge.source);
+          const target = byId.get(edge.target);
+          if (!source || !target) return null;
+          const s = center(source);
+          const t = center(target);
+          const sw = getNodeSize(source);
+          const tw = getNodeSize(target);
+          const dx = t.x - s.x;
+          const dy = t.y - s.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const ux = dx / len;
+          const uy = dy / len;
+          const sp = rectBorder(s.x, s.y, sw.w / 2, sw.h / 2, ux, uy, 2);
+          const tp = rectBorder(t.x, t.y, tw.w / 2, tw.h / 2, -ux, -uy, 2);
+          return {
+            edge,
+            len,
+            path: `M ${sp.x} ${sp.y} L ${tp.x} ${tp.y}`,
+            mx: (sp.x + tp.x) / 2,
+            my: (sp.y + tp.y) / 2,
+          };
+        })
+        .filter((g): g is { edge: EdgeData; len: number; path: string; mx: number; my: number } => Boolean(g)),
+    [edges, byId],
+  );
+
   const preview = dragEdge ? (() => {
     const src = nodes.find((n) => n.id === dragEdge.sourceId);
     if (!src) return null;
@@ -63,36 +95,10 @@ export const EdgeLayer = memo(function EdgeLayer({ nodes, edges, selectedEdgeIds
         </marker>
       </defs>
 
-      {edges.map(edge => {
-        const source = nodes.find(n => n.id === edge.source);
-        const target = nodes.find(n => n.id === edge.target);
-        if (!source || !target) return null;
-
-        const s = center(source);
-        const t = center(target);
-        const sw = getNodeSize(source);
-        const tw = getNodeSize(target);
-
-        // 连线方向（源中心 → 目标中心）
-        const dx = t.x - s.x, dy = t.y - s.y;
-        const len = Math.hypot(dx, dy) || 1;
-        const ux = dx / len, uy = dy / len;
-        // 源端：从边界探出；目标端：沿朝源方向探出，使箭头突出在目标边框外
-        const sp = rectBorder(s.x, s.y, sw.w / 2, sw.h / 2, ux, uy, 2);
-        const tp = rectBorder(t.x, t.y, tw.w / 2, tw.h / 2, -ux, -uy, 2);
-
-        // 端点对端点连线：sp/tp 都落在「源中心→目标中心」这条直线上，
-        // 直接用直线把它们连起来，保证箭头始终沿真实连线方向进入目标节点，
-        // 不会像水平曲率控制点那样让线条拐弯、箭头指向错乱。
-        const path = `M ${sp.x} ${sp.y} L ${tp.x} ${tp.y}`;
-
+      {geometry.map(({ edge, len, path, mx, my }) => {
         const isSelected = selectedEdgeIds.has(edge.id);
         const directed = edge.directed !== false; // 缺省视为有箭头
         const stroke = isSelected ? '#3b82f6' : 'rgba(100, 116, 139, 0.5)';
-
-        // 可见线段中点（标签落点）
-        const mx = (sp.x + tp.x) / 2;
-        const my = (sp.y + tp.y) / 2;
 
         return (
           <g key={edge.id} className="pointer-events-auto">
