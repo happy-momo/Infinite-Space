@@ -46,6 +46,21 @@ export function EdgeActionCard({
     dirtyRef.current = false;
   }, [edge?.id, edge?.label]);
 
+  // 无论焦点在何处（输入框内/AI 提案模式/空白处），Esc 都关闭本卡片：
+  // 还原手动草稿、丢弃待应用的 AI 提案，再让父组件取消选中以隐藏卡片。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.isComposing) return;
+      if (e.key !== 'Escape') return;
+      dirtyRef.current = false;
+      setDraft(edge?.label || '');
+      onCancelProposals();
+      onDismiss();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [edge?.id, edge?.label, onCancelProposals, onDismiss]);
+
   // 仅在「边切换」时聚焦输入框（不依赖 label，避免输入过程中被重聚焦打断）
   useEffect(() => {
     if (edge) inputRef.current?.focus();
@@ -55,12 +70,6 @@ export function EdgeActionCard({
     if (!edge || !dirtyRef.current) return; // 未编辑过则不提交，保住已有标注
     onUpdateLabel(edge.id, draft.trim());
   };
-  const cancel = () => {
-    if (!edge) return;
-    dirtyRef.current = false;
-    setDraft(edge?.label || '');
-  };
-
   const showManual = !!edge && !proposals;
   const showAi = !!proposals || isLabeling;
 
@@ -151,7 +160,7 @@ export function EdgeActionCard({
                 onKeyDown={(e) => {
                   if ((e.nativeEvent as KeyboardEvent).isComposing) return;
                   if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); onDismiss(); }
-                  if (e.key === 'Escape') { e.preventDefault(); cancel(); onDismiss(); }
+                  // Escape 由全局监听统一处理（还原草稿 + 关闭卡片），此处不重复拦截。
                 }}
                 onBlur={commit}
                 placeholder="如：原因、属于、引用于…"
