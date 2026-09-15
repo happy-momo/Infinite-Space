@@ -66,7 +66,7 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOp
       initial={{ y: 100, opacity: 0 }}
       animate={{ y: 0, opacity: 1 }}
       transition={{ type: "spring", stiffness: 200, damping: 20, delay: 0.2 }}
-      className="fixed bottom-4 left-1/2 -translate-x-1/2 md:bottom-8 flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 max-w-[95vw] overflow-x-auto custom-scrollbar bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl z-50 dark:bg-gray-900/80 dark:border-white/10"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 md:bottom-8 flex items-center gap-1.5 md:gap-2 p-1.5 md:p-2 w-max max-w-[clamp(16rem,calc(100vw - 34rem),82vw)] overflow-x-auto custom-scrollbar bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl z-50 dark:bg-gray-900/80 dark:border-white/10"
     >
       <ToolButton icon={<Type size={20} />} label="Text" onClick={() => onAdd('text')} />
       <ToolButton icon={<ImageIcon size={20} />} label="Image" onClick={() => onAdd('image')} />
