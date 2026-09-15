@@ -488,7 +488,9 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
         {node.type === 'table' && (
           <div
             className="w-full h-full flex-1 overflow-hidden"
-            onPointerDown={(e) => e.stopPropagation()}
+            // 让表格主体也能像其它节点一样作为拖拽手柄：
+            // 不再在这里整体拦截 pointerdown（否则只能从 44px 高的标题栏拖，体验不一致）。
+            // 单元格输入框自己已 stopPropagation，编辑/滚轮不受影响。
             onDoubleClick={(e) => e.stopPropagation()}
           >
             <TableEditor
@@ -724,7 +726,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
       </div>
 
       {/* 连线/新建 拖拽手柄：四个方向（上/右/下/左）各一，hover/选中时显示，可从任意一侧拉出连线 */}
-      {!isEditing && !isLinking && (isHovered || isSelected) && node.type !== 'table' && node.type !== 'chart' && (
+      {!isEditing && !isLinking && (isHovered || isSelected) && (
         <>
           {[
             { pos: 'top', cls: '-top-2 left-1/2 -translate-x-1/2' },

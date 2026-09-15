@@ -21,7 +21,7 @@ import { AiChatPanel } from './components/AiChatPanel';
 import { EdgeActionCard, EdgeProposal } from './components/EdgeActionCard';
 import { TagPanel } from './components/TagPanel';
 import { TagRibbon } from './components/TagRibbon';
-import { SuggestPanel } from './components/SuggestPanel';
+import { SuggestPanel, Suggestion } from './components/SuggestPanel';
 import { Template } from './templates';
 import { useHistory } from './hooks/useHistory';
 import { Plus, Layout, ChevronUp, ChevronDown, Sun, Moon } from 'lucide-react';
@@ -109,8 +109,18 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   // 文件夹展开状态（UI 态，可持久化）
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  // AI 联想面板
+  // AI 联想面板：按节点缓存结果，关闭侧栏或切换看板时整体清空
   const [isSuggestOpen, setIsSuggestOpen] = useState(false);
+  // 当前正在"联想"的源节点 id（不再直接跟随选区，点击空白/操作不会丢失上下文）
+  const [suggestForNodeId, setSuggestForNodeId] = useState<string | null>(null);
+  // 各节点的联想结果缓存（内存态，每个节点一份独立"对话记录"）
+  const [suggestByNode, setSuggestByNode] = useState<Record<string, { suggestions: Suggestion[]; error: string | null }>>({});
+  const [suggestLoading, setSuggestLoading] = useState(false);
+  // 「重新分析」时自增，驱动 fetch effect 重新跑（否则清缓存不会触发重组）
+  const [suggestEpoch, setSuggestEpoch] = useState(0);
+  // 缓存镜像 ref：让 fetch effect 的守卫读到最新缓存，避免闭包捕获陈旧快照
+  const suggestCacheRef = useRef(suggestByNode);
+  suggestCacheRef.current = suggestByNode;
   // 正在生成图表的表格节点 id
   const [generatingChartId, setGeneratingChartId] = useState<string | null>(null);
   // 标签筛选系统
@@ -840,18 +850,88 @@ export default function App() {
     setLinkSource(null);
   };
 
-  // AI 联想：当前选中的第一个节点作为联想源
-  const suggestSourceNode =
-    selectedIds.size === 1 ? nodes.find((n) => n.id === Array.from(selectedIds)[0]) || null : null;
-
-  // 联想面板里点「连线」→ 直接给源节点和目标节点加一条连线
+  // 联想面板里点「连线」→ 直接给源节点和目标节点加一条连线（不关闭面板）
   const handleConnectFromSuggest = (targetId: string) => {
-    if (!suggestSourceNode) return;
+    if (!suggestForNodeId) return;
     beginTransaction();
     setEdges((prev) => [
       ...prev,
-      { id: Math.random().toString(36).substring(7), source: suggestSourceNode.id, target: targetId, directed: true },
+      { id: Math.random().toString(36).substring(7), source: suggestForNodeId, target: targetId, directed: true },
     ]);
+  };
+
+  // 面板打开期间：选区切换为单个节点时，把「联想源」切换到该节点（保留各自缓存）
+  useEffect(() => {
+    if (!isSuggestOpen) return;
+    if (selectedIds.size === 1) {
+      const nid = Array.from(selectedIds)[0];
+      setSuggestForNodeId((prev) => (prev === nid ? prev : nid));
+    }
+  }, [isSuggestOpen, selectedIds]);
+
+  // 按节点拉取 AI 联想：该节点已有缓存则直接复用，不重复请求
+  // 守卫用 ref 读最新缓存；epoch 变化（重新分析）时强制重新拉取
+  useEffect(() => {
+    if (!isSuggestOpen || !suggestForNodeId) return;
+    if (suggestCacheRef.current[suggestForNodeId]) return; // 已有结果，保留（不清空）
+    const src = nodes.find((n) => n.id === suggestForNodeId);
+    if (!src) return;
+    setSuggestLoading(true);
+    const ctrl = new AbortController();
+    (async () => {
+      try {
+        const res = await fetch('/api/llm/associate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          signal: ctrl.signal,
+          body: JSON.stringify({ nodeId: suggestForNodeId, nodes, limit: 5 }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data?.error || '请求失败');
+        setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: data.suggestions || [], error: null } }));
+      } catch (e: any) {
+        if (e?.name !== 'AbortError') {
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: e?.message || '请求失败' } }));
+        }
+      } finally {
+        setSuggestLoading(false);
+      }
+    })();
+    return () => ctrl.abort();
+  }, [isSuggestOpen, suggestForNodeId, nodes, suggestEpoch]);
+
+  // 切换看板 → 清空 AI 联想内容并关闭面板
+  useEffect(() => {
+    setIsSuggestOpen(false);
+    setSuggestForNodeId(null);
+    setSuggestByNode({});
+    setSuggestLoading(false);
+  }, [currentPageId]);
+
+  // 关闭面板 → 清空全部联想缓存（下次打开重新分析）
+  const closeSuggest = () => {
+    setIsSuggestOpen(false);
+    setSuggestForNodeId(null);
+    setSuggestByNode({});
+    setSuggestLoading(false);
+    setSuggestEpoch((e) => e + 1);
+  };
+
+  // 重新分析当前节点：仅清掉该节点的缓存并触发一次新请求（不动其它节点）
+  const handleReanalyze = () => {
+    if (!suggestForNodeId) return;
+    setSuggestByNode((prev) => {
+      const next = { ...prev };
+      delete next[suggestForNodeId];
+      return next;
+    });
+    setSuggestEpoch((e) => e + 1);
+  };
+
+  // 工具栏开关：打开仅置 true；关闭走 closeSuggest（与 ✕ 行为一致，清空缓存）
+  const toggleSuggest = () => {
+    if (isSuggestOpen) closeSuggest();
+    else setIsSuggestOpen(true);
   };
 
   // ---- 连线增强：从节点边缘拖出预览线，松开时连线或新建节点 ----
@@ -1190,18 +1270,22 @@ export default function App() {
 
       if (response.ok && data.positions) {
         beginTransaction();
-        const labelNodes: NodeData[] = (data.groups || []).map((g: any) => ({
-          id: Math.random().toString(36).substring(7),
-          type: 'text',
-          x: g.x,
-          y: g.y - 44,
-          content: `<p><b>${escapeHtml(String(g.name || '组'))}</b></p>`,
-          color: 'rgba(255, 255, 255, 0.6)',
-          width: 200,
-          height: 36,
-          fontSize: 13,
-          zIndex: maxZ + 1,
-        }));
+        // 只为「有切实名字」的分组生成标签，避免服务端返回空/纯空白组名时
+        // 生成看似空的小框（<p><b></b></p>）。
+        const labelNodes: NodeData[] = (data.groups || [])
+          .filter((g: any) => typeof g.name === 'string' && g.name.trim())
+          .map((g: any) => ({
+            id: Math.random().toString(36).substring(7),
+            type: 'text',
+            x: g.x,
+            y: g.y - 44,
+            content: `<p><b>${escapeHtml(g.name.trim())}</b></p>`,
+            color: 'rgba(255, 255, 255, 0.6)',
+            width: 200,
+            height: 36,
+            fontSize: 13,
+            zIndex: maxZ + 1,
+          }));
         setMaxZ((prev) => prev + 1);
         // 应用新位置 + 自动打标：每个组把组主题名写为该组内所有节点的标签（去重）
         const tagByNode = new Map<string, string>();
@@ -1728,7 +1812,8 @@ export default function App() {
         onToggleSearch={() => setIsSearchOpen((o) => !o)}
         onToggleTagPanel={() => setIsTagPanelOpen((o) => !o)}
         isTagPanelOpen={isTagPanelOpen}
-        onToggleSuggest={() => setIsSuggestOpen((o) => !o)}
+        onToggleSuggest={toggleSuggest}
+        isSuggestOpen={isSuggestOpen}
         hasSingleSelection={selectedIds.size === 1}
         onAiOrganize={handleAiOrganize}
         isOrganizing={isOrganizing}
@@ -1808,11 +1893,17 @@ export default function App() {
 
       <SuggestPanel
         open={isSuggestOpen}
-        onClose={() => setIsSuggestOpen(false)}
-        sourceNode={suggestSourceNode}
+        onClose={closeSuggest}
+        sourceNode={suggestForNodeId ? nodes.find((n) => n.id === suggestForNodeId) || null : null}
         nodes={nodes}
+        suggestions={
+          suggestForNodeId && suggestByNode[suggestForNodeId] ? suggestByNode[suggestForNodeId].suggestions : []
+        }
+        loading={!!suggestForNodeId && suggestLoading && !suggestByNode[suggestForNodeId]}
+        error={suggestForNodeId && suggestByNode[suggestForNodeId] ? suggestByNode[suggestForNodeId].error : null}
         onFocus={focusNode}
         onConnect={handleConnectFromSuggest}
+        onReanalyze={handleReanalyze}
       />
 
       <input

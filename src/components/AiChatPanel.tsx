@@ -181,7 +181,7 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, mess
           animate={{ x: 0, opacity: 1 }}
           exit={{ x: 380, opacity: 0 }}
           transition={{ type: 'spring', stiffness: 320, damping: 30 }}
-          className="fixed top-0 right-0 bottom-0 w-[90vw] md:w-[380px] z-[60] bg-white/95 backdrop-blur-2xl border-l border-white/60 shadow-[-8px_0_32px_rgba(0,0,0,0.08)] flex flex-col dark:bg-gray-900/95 dark:border-white/10"
+          className="fixed right-6 top-20 bottom-24 w-[90vw] md:w-[380px] max-w-[90vw] z-[60] bg-white/90 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl overflow-hidden flex flex-col dark:bg-gray-900/90 dark:border-white/10"
           onPointerDown={(e) => e.stopPropagation()}
         >
           {/* Header */}
