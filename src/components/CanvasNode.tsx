@@ -9,6 +9,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { TableEditor } from './TableEditor';
 import { ChartNode } from './ChartNode';
+import { fetchLinkInfo } from '../lib/linkinfo';
 
 const FONTS = [
   { label: 'Default Font', value: '' },
@@ -561,8 +562,8 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
             const url = link.url.trim();
             if (!/^https?:\/\//i.test(url)) return;
             try {
-              const res = await fetch(`/api/linkinfo?url=${encodeURIComponent(url)}`);
-              const data = await res.json();
+              // 浏览器端尽力抓取（静态版无后端；受目标站点 CORS 限制，失败则静默跳过）。
+              const data = await fetchLinkInfo(url);
               if (!data.ok) return;
               const updated = { ...link };
               if (!updated.title && data.title) updated.title = String(data.title).slice(0, 200);

@@ -8,6 +8,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { X, Send, Loader2, Sparkles, Square, MessageSquare, Trash2 } from 'lucide-react';
 import { NodeData, EdgeData, ChatMessage, NodeType } from '../types';
+import { loadConfig } from '../lib/config';
+import { streamLlm } from '../lib/llm';
 
 interface Props {
   open: boolean;
@@ -47,6 +49,45 @@ const toPlainText = (content: string): string =>
     .replace(/[#*`_>~-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+// 把看板节点/连线序列化为上下文附加到 system 指令（浏览器版，镜像服务端 buildCanvasContext）。
+const buildCanvasContext = (pageName: string, nodes: NodeData[], edges: EdgeData[]): string => {
+  const sys =
+    '你是一个嵌入无限画布应用的 AI 助手。用简洁、友好的中文回答用户关于画布与节点内容的提问，也可帮用户梳理、扩展、总结思路。';
+  if (!Array.isArray(nodes) || nodes.length === 0) return sys;
+  const nodesText = nodes
+    .slice(0, 80)
+    .map((n) => {
+      let t = '';
+      if (n.type === 'table' && Array.isArray(n.tableData) && n.tableData.length > 0) {
+        t = n.tableData
+          .slice(0, 10)
+          .map((row: any[]) => row.map((c: any) => String(c?.text ?? '')).join(' | '))
+          .join('\n')
+          .slice(0, 600);
+      } else if (n.type === 'chart' && n.chartConfig) {
+        const pts = (n.chartConfig.data || [])
+          .slice(0, 15)
+          .map((d: any) => `${d.label}:${d.value}`)
+          .join(', ');
+        t = `[${n.chartConfig.chartType || 'chart'}] ${n.chartConfig.title || ''} | ${pts}`;
+      } else {
+        t = (typeof n.content === 'string' ? n.content : '')
+          .replace(/<[^>]*>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 200);
+      }
+      const tagText = Array.isArray(n.tags) && n.tags.length ? `[标签:${n.tags.slice(0, 5).join(',')}] ` : '';
+      return `- [${n.type || 'text'}] (id=${n.id}) ${tagText}${t}`;
+    })
+    .join('\n');
+  const edgeText = (Array.isArray(edges) ? edges : [])
+    .slice(0, 100)
+    .map((e) => `${e.source} → ${e.target}`)
+    .join('\n');
+  return `${sys}\n\n当前看板「${pageName || '未命名'}」的内容：\n${nodesText}\n\n节点之间的连接：\n${edgeText || '（无）'}\n说明：你可以参考上面的看板内容回答问题，但不要编造看板中不存在的内容。`;
+};
 
 export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, messages, onChangeMessages, onClear, onInsertNode }: Props) {
   const [input, setInput] = useState('');
@@ -88,51 +129,23 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, mess
     let committed = '';
 
     try {
-      const res = await fetch('/api/llm/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        signal: controller.signal,
-        body: JSON.stringify({
-          messages: base.map((m) => ({ role: m.role, content: m.content })),
-          context: { pageName: currentPageName, nodes, edges },
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        onChangeMessages([...base, { role: 'assistant', content: `⚠️ ${data.error || '请求失败'}` }]);
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        onChangeMessages([...base, { role: 'assistant', content: '⚠️ 请先在「LLM 设置」中配置 Base URL / 模型 / API Key（密钥仅保存在你的浏览器）' }]);
+        streamingRef.current = false;
         return;
       }
-      if (!res.body) return;
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let acc = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        acc += decoder.decode(value, { stream: true });
-        let idx: number;
-        // 解析 SSE 行
-        while ((idx = acc.indexOf('\n')) !== -1) {
-          const line = acc.slice(0, idx); acc = acc.slice(idx + 1);
-          if (!line.startsWith('data:')) continue;
-          const payload = line.replace(/^data:\s*/, '').trim();
-          if (!payload) continue;
-          try {
-            const o = JSON.parse(payload);
-            if (o.error) {
-              committed += `\n⚠️ ${o.error}`;
-              streamingRef.current = false;
-              break;
-            }
-            if (o.done) { streamingRef.current = false; break; }
-            if (typeof o.delta === 'string') {
-              committed += o.delta;
-              setStreamText(committed);
-            }
-          } catch { /* skip */ }
-        }
-        if (!streamingRef.current) break;
-      }
+      // 浏览器端直接流式调用 OpenAI 兼容端点（静态版无后端）。
+      const system = buildCanvasContext(currentPageName, nodes, edges);
+      await streamLlm(
+        cfg,
+        [{ role: 'system' as const, content: system }, ...base.map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))],
+        (delta) => {
+          committed += delta;
+          setStreamText(committed);
+        },
+        { signal: controller.signal },
+      );
       // 流结束（含中途被 stop）时把累积内容提交为一条 assistant 消息
       if (committed.trim()) {
         onChangeMessages([...base, { role: 'assistant', content: committed.trim() }]);
@@ -140,7 +153,7 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, mess
       setStreamText('');
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
-        onChangeMessages([...base, { role: 'assistant', content: '⚠️ 请求失败，请检查服务与 LLM 配置' }]);
+        onChangeMessages([...base, { role: 'assistant', content: `⚠️ ${e?.message || '请求失败'}` }]);
       }
     } finally {
       setStreaming(false);

@@ -25,6 +25,18 @@ import { SuggestPanel, Suggestion } from './components/SuggestPanel';
 import { Template } from './templates';
 import { useHistory } from './hooks/useHistory';
 import { Plus, Layout, ChevronUp, ChevronDown, Sun, Moon } from 'lucide-react';
+import { loadConfig } from './lib/config';
+import {
+  organizeNodes as organizeNodesLlm,
+  summarizeBoard as summarizeBoardLlm,
+  associateNodes as associateNodesLlm,
+  llmProposeEdgeRelations as proposeEdgeRelationsLlm,
+  analyzeChart as analyzeChartLlm,
+} from './lib/llm';
+
+// 静态部署版（GitHub Pages）没有后端：关闭所有服务端持久化与回读，画布完全依赖 localStorage。
+// Static build (GitHub Pages) has no backend — disable server persistence entirely.
+const ENABLE_SERVER_SYNC = false;
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -271,6 +283,7 @@ export default function App() {
   }, []);
 
   const postBundle = useCallback(async () => {
+    if (!ENABLE_SERVER_SYNC) return;
     try {
       await fetch('/api/data', {
         method: 'POST',
@@ -354,6 +367,7 @@ export default function App() {
 
   // Hydrate from server on mount; migrate localStorage state up if server is empty.
   useEffect(() => {
+    if (!ENABLE_SERVER_SYNC) return; // 静态版完全用 localStorage，不回读服务端
     (async () => {
       try {
         const res = await fetch('/api/data');
@@ -728,14 +742,14 @@ export default function App() {
     setIsLabeling(true);
     setEdgeProposals(null);
     try {
-      const res = await fetch('/api/llm/edge-relations', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: activeNodes, edges: targets }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !Array.isArray(data.relations)) {
-        alert(data.error || 'AI 标注失败');
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
+      }
+      const data = await proposeEdgeRelationsLlm(cfg, activeNodes, targets);
+      if (!Array.isArray(data.relations)) {
+        alert('AI 标注失败');
         return;
       }
       const byId = new Map(activeNodes.map((n) => [n.id, n]));
@@ -880,15 +894,15 @@ export default function App() {
     const ctrl = new AbortController();
     (async () => {
       try {
-        const res = await fetch('/api/llm/associate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: ctrl.signal,
-          body: JSON.stringify({ nodeId: suggestForNodeId, nodes, limit: 5 }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data?.error || '请求失败');
-        setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: data.suggestions || [], error: null } }));
+        const cfg = loadConfig();
+        if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: '请先在「LLM 设置」中配置 Base URL / 模型 / API Key' } }));
+          return;
+        }
+        const data = await associateNodesLlm(cfg, nodes, suggestForNodeId, 5);
+        if (!ctrl.signal.aborted) {
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: data.suggestions || [], error: null } }));
+        }
       } catch (e: any) {
         if (e?.name !== 'AbortError') {
           setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: e?.message || '请求失败' } }));
@@ -1259,16 +1273,15 @@ export default function App() {
   const handleAiOrganize = async () => {
     setIsOrganizing(true);
     try {
-      const response = await fetch('/api/organize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // 筛选激活时只整理当前可见子集，否则整理全量
-        body: JSON.stringify({ nodes: activeNodes, edges: activeEdges })
-      });
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
+      }
+      // 浏览器端直接调用；筛选激活时只整理当前可见子集，否则整理全量
+      const data = await organizeNodesLlm(activeNodes, activeEdges, cfg);
 
-      const data = await response.json();
-
-      if (response.ok && data.positions) {
+      if (data.positions) {
         beginTransaction();
         // 只为「有切实名字」的分组生成标签，避免服务端返回空/纯空白组名时
         // 生成看似空的小框（<p><b></b></p>）。
@@ -1306,7 +1319,7 @@ export default function App() {
         }).concat(labelNodes));
         fitViewport(data.positions, activeNodes);
       } else {
-        alert(data.error || "Failed to organize nodes");
+        alert("Failed to organize nodes");
       }
     } catch (e) {
       console.error(e);
@@ -1401,28 +1414,22 @@ export default function App() {
         }
       }
       const snap = stateRef.current;
-      const response = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodes: snap.nodes.filter((n) => n.id !== storyNodeId),
-          edges: snap.edges,
-          instruction: opts.instruction,
-          style: opts.style,
-        }),
-      });
-      const data = await response.json();
-      if (response.ok && data.summary) {
-        beginTransaction();
-        const html = `<p><b>看板故事线</b></p>${textToHtml(data.summary)}`;
-        const estimatedLines = Math.max(1, Math.ceil(data.summary.length / 42));
-        handleUpdateNode(storyNodeId, {
-          content: html,
-          height: Math.min(640, Math.max(240, estimatedLines * 24 + 120)),
-        });
-      } else {
-        alert(data.error || '重新生成失败');
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
       }
+      const summary = await summarizeBoardLlm(snap.nodes.filter((n) => n.id !== storyNodeId), snap.edges, cfg, {
+        instruction: opts.instruction,
+        style: opts.style,
+      });
+      beginTransaction();
+      const html = `<p><b>看板故事线</b></p>${textToHtml(summary)}`;
+      const estimatedLines = Math.max(1, Math.ceil(summary.length / 42));
+      handleUpdateNode(storyNodeId, {
+        content: html,
+        height: Math.min(640, Math.max(240, estimatedLines * 24 + 120)),
+      });
     } catch (e) {
       console.error(e);
       alert('重新生成失败，请检查服务与 LLM 配置');
@@ -1477,13 +1484,13 @@ export default function App() {
     try {
       // TableCell[][] → string[][]
       const rows = table.tableData.map((row) => row.map((c) => c.text));
-      const response = await fetch('/api/llm/chart', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
-      });
-      const data = await response.json();
-      if (response.ok && Array.isArray(data.data) && data.data.length > 0) {
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
+      }
+      const data = await analyzeChartLlm(cfg, rows);
+      if (Array.isArray(data.data) && data.data.length > 0) {
         beginTransaction();
         const tw = table.width || 480;
         const chartNode: NodeData = {
@@ -1510,11 +1517,11 @@ export default function App() {
         setSelectedIds(new Set([chartNode.id]));
         setSelectedEdgeIds(new Set());
       } else {
-        alert(data.error || 'AI 生成图表失败');
+        alert('AI 生成图表失败');
       }
     } catch (e) {
       console.error(e);
-      alert('AI 生成图表失败，请检查服务与 LLM 配置');
+      alert('AI 生成图表失败：' + (e?.message || ''));
     } finally {
       setGeneratingChartId(null);
     }
@@ -1531,18 +1538,14 @@ export default function App() {
           flushSync(() => el.blur());
         }
       }
-      const response = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // 筛选激活时只总结当前可见子集，否则总结全量
-        body: JSON.stringify({ nodes: activeNodes, edges: activeEdges }),
-      });
-      const data = await response.json();
-      if (response.ok && data.summary) {
-        addSummaryNode(data.summary);
-      } else {
-        alert(data.error || "AI 总结失败");
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
       }
+      // 筛选激活时只总结当前可见子集，否则总结全量
+      const summary = await summarizeBoardLlm(activeNodes, activeEdges, cfg);
+      addSummaryNode(summary);
     } catch (e) {
       console.error(e);
       alert("调用 AI 总结失败，请检查服务与 LLM 配置");
@@ -1562,22 +1565,13 @@ export default function App() {
         }
       }
       const label = Array.from(selectedTags).join('、') || '筛选';
-      const response = await fetch('/api/summarize', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nodes: activeNodes,
-          edges: activeEdges,
-          mode: 'subset',
-          subsetLabel: label,
-        }),
-      });
-      const data = await response.json();
-      if (response.ok && data.summary) {
-        addSubsetSummaryNode(data.summary, label);
-      } else {
-        alert(data.error || "AI 子集总结失败");
+      const cfg = loadConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
+        return;
       }
+      const summary = await summarizeBoardLlm(activeNodes, activeEdges, cfg, { mode: 'subset', subsetLabel: label });
+      addSubsetSummaryNode(summary, label);
     } catch (e) {
       console.error(e);
       alert("调用 AI 子集总结失败，请检查服务与 LLM 配置");

@@ -4,6 +4,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { X, Loader2, CheckCircle2, XCircle, Plug, ChevronDown } from 'lucide-react';
+import { loadConfig, saveConfig, publicConfig } from '../lib/config';
+import { testConnection } from '../lib/llm';
 
 interface Props {
   open: boolean;
@@ -40,15 +42,12 @@ export function SettingsModal({ open, onClose }: Props) {
     setApiKey('');
     setResult(null);
     setPresetOpen(false);
-    fetch('/api/settings')
-      .then((r) => r.json())
-      .then((cfg) => {
-        setBaseUrl(cfg.baseUrl || '');
-        setModel(cfg.model || '');
-        setApiKeyMask(cfg.apiKeyMask || '');
-        setHasKey(!!cfg.hasKey);
-      })
-      .catch(() => {});
+    // 静态版：从 localStorage 读取（不在服务端）。
+    const pc = publicConfig(loadConfig());
+    setBaseUrl(pc.baseUrl || '');
+    setModel(pc.model || '');
+    setApiKeyMask(pc.apiKeyMask || '');
+    setHasKey(!!pc.hasKey);
   }, [open]);
 
   // Escape to close, matching the canvas rename convention.
@@ -87,16 +86,10 @@ export function SettingsModal({ open, onClose }: Props) {
     setTesting(true);
     setResult(null);
     try {
-      const res = await fetch('/api/llm/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, model, apiKey }),
-      });
-      const data = await res.json();
-      if (data.ok) setResult({ ok: true, msg: `连接成功：${data.reply}` });
-      else setResult({ ok: false, msg: data.error || '连接失败' });
-    } catch {
-      setResult({ ok: false, msg: '请求失败（无法连接服务器）' });
+      const reply = await testConnection({ baseUrl, model, apiKey });
+      setResult({ ok: true, msg: `连接成功：${reply}` });
+    } catch (e: any) {
+      setResult({ ok: false, msg: e?.message || '连接失败' });
     } finally {
       setTesting(false);
     }
@@ -106,22 +99,16 @@ export function SettingsModal({ open, onClose }: Props) {
     setSaving(true);
     setResult(null);
     try {
-      const res = await fetch('/api/settings', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ baseUrl, model, apiKey }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        setApiKeyMask(data.apiKeyMask || '');
-        setHasKey(!!data.hasKey);
-        setApiKey('');
-        setResult({ ok: true, msg: '设置已保存' });
-      } else {
-        setResult({ ok: false, msg: data.error || '保存失败' });
-      }
+      saveConfig({ baseUrl, model, apiKey });
+      const pc = publicConfig(loadConfig());
+      setBaseUrl(pc.baseUrl);
+      setModel(pc.model);
+      setApiKeyMask(pc.apiKeyMask || '');
+      setHasKey(!!pc.hasKey);
+      setApiKey('');
+      setResult({ ok: true, msg: '设置已保存（仅保存在当前浏览器的 localStorage）' });
     } catch {
-      setResult({ ok: false, msg: '保存失败（无法连接服务器）' });
+      setResult({ ok: false, msg: '保存失败' });
     } finally {
       setSaving(false);
     }
