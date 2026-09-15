@@ -279,6 +279,8 @@ export interface GroupAnchor {
   name: string;
   x: number;
   y: number;
+  /** 该分组包含的节点 id，供客户端按组打标签 */
+  nodeIds: string[];
 }
 
 // Deterministic tidy layout: each group is a grid sized to its largest node (so
@@ -324,7 +326,7 @@ function layoutGroups(
       bandH = 0;
     }
 
-    anchors.push({ name: g.name, x, y });
+    anchors.push({ name: g.name, x, y, nodeIds: ids });
     ids.forEach((id, i) => {
       const r = Math.floor(i / cols);
       const c = i % cols;
@@ -422,9 +424,35 @@ export async function summarizeBoard(
   nodes: NodeInput[],
   edges: EdgeInput[],
   cfg: LlmConfig,
-  opts: { instruction?: string; style?: string } = {},
+  opts: { instruction?: string; style?: string; mode?: 'board' | 'subset'; subsetLabel?: string } = {},
 ): Promise<string> {
   const { list, truncated } = serializeNodes(nodes);
+
+  // 子集总结：与看板故事线不同的简短提示词，聚焦"这组筛选出的节点"的共同主题与信息。
+  if (opts.mode === 'subset') {
+    const label = opts.subsetLabel?.trim() || '筛选';
+    const nodeLines = list.map((n) => `- ${n.id}(${n.type}) ${n.content}`).join('\n');
+    const system =
+      'You are a faithful canvas summarizer. NEVER invent facts. Only use the provided node contents. Reply in the user\'s language, concise plain text, no markdown, no emoji, no list markers.';
+    const user = `
+这是无限画布中经过标签筛选得到的「${label}」子集，属于同一主题的节点。请用简洁中文总结：
+1. 这个子集共同的「主题 / 话题」是什么：一句话。
+2. 子集内各节点的关键信息：逐条简短列出。
+3. 这些节点合在一起能得出什么结论或整体印象。
+
+要求：
+- 只描述下面给出的节点内容，严禁编造节点中不存在的信息。
+- 每个节点内容只属于它自己，不要混淆或张冠李戴。
+- 开头务必注明「以下是「${label}」子集的总结：」，表明这是子集总结。
+- 中文纯文本，不用 Markdown / emoji，总字数不超过 400 字。
+${opts.instruction ? `\n额外要求：${opts.instruction}` : ''}
+
+子集节点：
+${nodeLines}
+${truncated ? `\n(注：节点过多，以上仅为前 ${list.length} 个。)` : ''}
+`;
+    return sanitizeText(await callLlm(cfg, system, user));
+  }
 
   // Bind real edges to both endpoints' content so the model can only reference
   // relationships that actually exist, and mark every isolated node explicitly.
@@ -670,4 +698,79 @@ export async function testConnection(cfg: LlmConfig): Promise<string> {
     30_000,
   );
   return reply;
+}
+
+export interface EdgeRelation {
+  edgeId: string;
+  label: string;
+}
+
+// 去除 HTML 标签与多余空白，得到便于 LLM 阅读的纯文本。
+function toPlainText(s: string, max: number): string {
+  return String(s || '')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+// AI 关系标注：为每一条连线读出两端节点内容，生成简短中文关系说明。
+// 只标注两端都在 nodes 内的边；未成功标注的边会被跳过。
+export async function llmProposeEdgeRelations(
+  cfg: LlmConfig,
+  nodes: NodeInput[],
+  edges: EdgeInput[],
+): Promise<{ relations: EdgeRelation[] }> {
+  if (!Array.isArray(edges) || edges.length === 0) return { relations: [] };
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const valid = edges
+    .filter((e) => e && typeof e.id === 'string' && byId.has(e.source) && byId.has(e.target))
+    .slice(0, 100);
+  if (valid.length === 0) return { relations: [] };
+
+  const describe = (n: NodeInput) => {
+    const t = n.type || 'text';
+    if (t === 'image') return '[图片]';
+    return `[${t}] ${toPlainText(serializeContent(n), 120)}`;
+  };
+
+  const listText = valid
+    .map((e) => {
+      const s = byId.get(e.source)!;
+      const t = byId.get(e.target)!;
+      return `- ${e.id}: ${describe(s)} → ${describe(t)}`;
+    })
+    .join('\n');
+
+  const system = '你是一个关系标注助手。只返回 JSON，不要多余文字。';
+  const user = `
+看板中有以下连线，每条都是「源节点 → 目标节点」。请为每条连线生成一个简短的中文关系说明（2-20 字），
+说明源节点与目标节点之间的关系，例如：「原因」「属于」「引用于」「包含」「支持」「反对」「前置条件」等。
+关系说明要与两端节点的内容相关。
+
+连线列表：
+${listText}
+
+只返回 JSON，格式：
+{"relations":[{"edgeId":"<连线的 id>","label":"<关系说明>"}]}
+必须为上面列出的每条连线都返回一项，edgeId 必须与列表中的 id 完全一致。
+`;
+
+  const text = await callLlm(cfg, system, user);
+  const parsed = extractJson(text);
+  const raw = Array.isArray((parsed as any)?.relations) ? (parsed as any).relations : [];
+  const allowed = new Set(valid.map((e) => e.id));
+
+  const relations: EdgeRelation[] = raw
+    .filter(
+      (r: any) =>
+        r && typeof r.edgeId === 'string' && allowed.has(r.edgeId) && typeof r.label === 'string',
+    )
+    .map((r: any) => ({
+      edgeId: r.edgeId,
+      label: r.label.trim().slice(0, 40),
+    }))
+    .filter((r: EdgeRelation) => r.label.length > 0);
+
+  return { relations };
 }

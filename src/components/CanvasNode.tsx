@@ -1,7 +1,7 @@
 // 单个画布节点：文字/图片/链接三种类型的渲染、编辑、拖拽移动、缩放调整、
 // 字体与字号选择，以及连线模式下作为“目标”被点击。
 // Single canvas node — renders text/image/link cards and handles drag, resize and inline editing.
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { memo, useState, useRef, useEffect, useMemo } from 'react';
 import { motion } from 'motion/react';
 import { NodeData } from '../types';
 import { X, Type, Image as ImageIcon, Link, Edit2, Check, Upload, ChevronDown, FileCode2 } from 'lucide-react';
@@ -153,15 +153,13 @@ interface Props {
   onTransactionStart: () => void;
   /** 从节点边缘拖出，开始连线/新建节点（P0 连线增强） */
   onDragEdgeStart: (e: React.PointerEvent, sourceId: string) => void;
-  /** 标签筛选时该节点是否淡化（不匹配当前筛选） */
-  dimmed?: boolean;
   /** 表格节点：请求 AI 生成图表 */
   onGenerateChart?: (tableNodeId: string) => void;
   /** 该表格节点是否正在生成图表 */
   isGeneratingChart?: boolean;
 }
 
-export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected, onSelect, isLinking, onLinkClick, onTransactionStart, onDragEdgeStart, dimmed, onGenerateChart, isGeneratingChart }: Props) {
+export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected, onSelect, isLinking, onLinkClick, onTransactionStart, onDragEdgeStart, onGenerateChart, isGeneratingChart }: Props) {
   const [isHovered, setIsHovered] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [isFontPickerOpen, setIsFontPickerOpen] = useState(false);
@@ -306,7 +304,7 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
       onPointerDown={handleNodePointerDown}
       className={`absolute origin-top-left rounded-2xl shadow-lg border backdrop-blur-xl group flex flex-col transition-shadow select-none ${
         isSelected ? 'ring-2 ring-blue-500 shadow-blue-500/20' : 'border-gray-200/50'
-      } ${isLinking ? 'cursor-crosshair hover:ring-2 hover:ring-green-500' : ''} ${dimmed ? 'opacity-30' : ''}`}
+      } ${isLinking ? 'cursor-crosshair hover:ring-2 hover:ring-green-500' : ''}`}
       style={{
         x: node.x,
         y: node.y,
@@ -725,16 +723,26 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
         )}
       </div>
 
-      {/* 连线/新建 拖拽手柄：右侧垂直中点，hover 时显示 */}
+      {/* 连线/新建 拖拽手柄：四个方向（上/右/下/左）各一，hover/选中时显示，可从任意一侧拉出连线 */}
       {!isEditing && !isLinking && (isHovered || isSelected) && node.type !== 'table' && node.type !== 'chart' && (
-        <div
-          onPointerDown={(e) => onDragEdgeStart(e, node.id)}
-          className="absolute -right-2 top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-blue-500 border-2 border-white cursor-crosshair z-20 flex items-center justify-center transition-transform hover:scale-125"
-          style={{ boxShadow: '0 1px 6px rgba(37,99,235,0.5)' }}
-          title="拖出以连线或新建节点"
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-white" />
-        </div>
+        <>
+          {[
+            { pos: 'top', cls: '-top-2 left-1/2 -translate-x-1/2' },
+            { pos: 'right', cls: '-right-2 top-1/2 -translate-y-1/2' },
+            { pos: 'bottom', cls: '-bottom-2 left-1/2 -translate-x-1/2' },
+            { pos: 'left', cls: '-left-2 top-1/2 -translate-y-1/2' },
+          ].map((p) => (
+            <div
+              key={p.pos}
+              onPointerDown={(e) => onDragEdgeStart(e, node.id)}
+              className={`absolute ${p.cls} w-3.5 h-3.5 rounded-full bg-blue-500 border-2 border-white cursor-crosshair z-20 flex items-center justify-center transition-transform hover:scale-125 ${isHovered && !isSelected ? 'opacity-70' : 'opacity-100'}`}
+              style={{ boxShadow: '0 1px 6px rgba(37,99,235,0.5)' }}
+              title="拖出以连线或新建节点"
+            >
+              <span className="w-1 h-1 rounded-full bg-white block" />
+            </div>
+          ))}
+        </>
       )}
 
       {/* Resize Handle */}
@@ -761,4 +769,4 @@ export function CanvasNode({ node, onRemove, onUpdate, bringToFront, isSelected,
       )}
     </motion.div>
   );
-}
+});

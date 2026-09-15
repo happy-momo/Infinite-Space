@@ -11,14 +11,16 @@ import { Minimap } from './components/Minimap';
 import { ViewportControls } from './components/ViewportControls';
 import { StoryControls } from './components/StoryControls';
 import { EdgeLayer } from './components/EdgeLayer';
-import { NodeData, NodeType, EdgeData, Page } from './types';
+import { NodeData, NodeType, EdgeData, Page, ChatMessage } from './types';
 import { initialNodes } from './data';
 import { PagesTree } from './components/PagesTree';
 import { SettingsModal } from './components/SettingsModal';
 import { SearchPanel } from './components/SearchPanel';
 import { TemplateModal } from './components/TemplateModal';
 import { AiChatPanel } from './components/AiChatPanel';
+import { EdgeActionCard, EdgeProposal } from './components/EdgeActionCard';
 import { TagPanel } from './components/TagPanel';
+import { TagRibbon } from './components/TagRibbon';
 import { SuggestPanel } from './components/SuggestPanel';
 import { Template } from './templates';
 import { useHistory } from './hooks/useHistory';
@@ -33,6 +35,23 @@ const textToHtml = (text: string) =>
     .split(/\n{2,}/)
     .map((block) => `<p>${escapeHtml(block.trim()).replace(/\n/g, '<br/>')}</p>`)
     .join('');
+
+// 新建节点的浅色系背景色池（含半透明白玻璃 + 与品牌一致的柔和色相，见 node.color）。
+// Light pastel background pool for newly created nodes — white glass plus soft
+// indigo/violet/emerald/sky/pink/amber tints that match the app's glassmorphism.
+const NODE_COLOR_POOL = [
+  'rgba(255, 255, 255, 0.9)',
+  'rgba(238, 242, 255, 0.9)', // indigo-50
+  'rgba(245, 243, 255, 0.9)', // violet-50
+  'rgba(240, 253, 244, 0.9)', // green-50
+  'rgba(236, 253, 245, 0.9)', // emerald-50
+  'rgba(236, 249, 255, 0.9)', // sky-50
+  'rgba(224, 242, 254, 0.9)', // sky-100
+  'rgba(254, 242, 252, 0.9)', // pink-50
+  'rgba(255, 237, 213, 0.9)', // orange-100
+  'rgba(250, 245, 255, 0.9)', // purple-50
+];
+const randomNodeColor = () => NODE_COLOR_POOL[Math.floor(Math.random() * NODE_COLOR_POOL.length)];
 
 export default function App() {
   const [pages, setPages] = useState<Page[]>(() => {
@@ -50,13 +69,28 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeData[]>([]);
   const [edges, setEdges] = useState<EdgeData[]>([]);
 
+  // 按画布分桶的 AI 对话（每画布独立、localStorage 持久化）
+  const [chatByPage, setChatByPage] = useState<Record<string, ChatMessage[]>>({});
+
   const [maxZ, setMaxZ] = useState(10);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [selectedEdgeIds, setSelectedEdgeIds] = useState<Set<string>>(new Set());
   const [isLinking, setIsLinking] = useState(false);
   const [linkSource, setLinkSource] = useState<string | null>(null);
+
+  // 性能：用 ref 同步高频/易变的状态，使传给 memo 节点的回调能保持「稳定身份」，
+  // 避免任意交互都触发所有节点/连线重渲染。仅读最新值，不改行为。
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+  const maxZRef = useRef(maxZ);
+  maxZRef.current = maxZ;
+  const isLinkingRef = useRef(isLinking);
+  isLinkingRef.current = isLinking;
   const [isOrganizing, setIsOrganizing] = useState(false);
   const [isSummarizing, setIsSummarizing] = useState(false);
+  // 边的关系说明（AI 提案）
+  const [edgeProposals, setEdgeProposals] = useState<EdgeProposal[] | null>(null);
+  const [isLabeling, setIsLabeling] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [spaceDown, setSpaceDown] = useState(false);
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
@@ -155,6 +189,34 @@ export default function App() {
     localStorage.setItem('canvas_pages', JSON.stringify(pages));
     localStorage.setItem('canvas_current_page', currentPageId);
   }, [pages, currentPageId]);
+
+  // ---- Per-canvas AI chat persistence ----
+  // 懒加载当前画布对话（首次访问某画布时从 localStorage 读入）
+  useEffect(() => {
+    if (chatByPage[currentPageId] !== undefined) return;
+    let saved: ChatMessage[] = [];
+    try {
+      const raw = localStorage.getItem(`chat_${currentPageId}`);
+      if (raw) saved = JSON.parse(raw);
+    } catch { /* ignore */ }
+    setChatByPage((prev) => (prev[currentPageId] !== undefined ? prev : { ...prev, [currentPageId]: saved }));
+  }, [currentPageId, chatByPage]);
+
+  // 自动保存当前画布对话
+  useEffect(() => {
+    const chat = chatByPage[currentPageId];
+    if (chat === undefined) return;
+    if (chat.length === 0) localStorage.removeItem(`chat_${currentPageId}`);
+    else localStorage.setItem(`chat_${currentPageId}`, JSON.stringify(chat));
+  }, [chatByPage, currentPageId]);
+
+  const handleChatChange = (next: ChatMessage[]) => {
+    setChatByPage((prev) => ({ ...prev, [currentPageId]: next }));
+  };
+  const handleClearChat = () => {
+    setChatByPage((prev) => ({ ...prev, [currentPageId]: [] }));
+    localStorage.removeItem(`chat_${currentPageId}`);
+  };
 
   // ---- Server-side persistence (data/state.json) ----
   const stateRef = useRef({ pages, currentPageId, nodes, edges, x, y, scale });
@@ -436,6 +498,38 @@ export default function App() {
     if (!el) return;
 
     const handleWheel = (e: WheelEvent) => {
+      // 如果滚轮作用于某个可滚动的嵌套面板（左侧页面树 / 弹窗 / 侧边栏等），
+      // 交给浏览器的原生滚动，而不是缩放画布。
+      const target = e.target as Element | null;
+
+      // 左侧页面树面板：把滚轮统一导向内部列表（即使在头部/底栏上滚动也翻看内容）
+      if (target && target !== el && target.closest('[data-panel="pages"]')) {
+        const list = target.closest('[data-panel="pages"]')!.querySelector<HTMLElement>('.pages-list');
+        if (list) {
+          const max = list.scrollHeight - list.clientHeight;
+          if (max > 0) list.scrollTop = Math.min(max, Math.max(0, list.scrollTop + e.deltaY));
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        return;
+      }
+
+      // 其他可滚动的嵌套面板（弹窗 / 侧边栏 / 聊天等）：交给原生滚动，不缩放画布
+      if (target && target !== el) {
+        let n: Element | null = target;
+        while (n && n !== el) {
+          const cs = window.getComputedStyle(n);
+          const scrollable =
+            (cs.overflowY === 'auto' || cs.overflowY === 'scroll' || cs.overflowY === 'overlay') &&
+            n.scrollHeight > n.clientHeight + 1;
+          if (scrollable) {
+            e.stopPropagation();
+            return;
+          }
+          n = n.parentElement;
+        }
+      }
+
       e.preventDefault();
 
       if (e.shiftKey) {
@@ -543,7 +637,7 @@ export default function App() {
       x: addX - 150,
       y: addY - 100,
       content: defaultContent,
-      color: 'rgba(255, 255, 255, 0.95)',
+      color: randomNodeColor(),
       width: type === 'image' ? 400 : type === 'markdown' ? 420 : type === 'table' ? 480 : 300,
       height: type === 'image' ? 300 : type === 'markdown' ? 320 : type === 'table' ? 360 : undefined,
       zIndex: maxZ + 1
@@ -565,7 +659,7 @@ export default function App() {
       x: addX + 20,
       y: addY + 120,
       content,
-      color: 'rgba(255,255,255,0.95)',
+      color: randomNodeColor(),
       width: type === 'markdown' ? 420 : 300,
       height: type === 'markdown' ? 320 : undefined,
       zIndex: maxZ + 1,
@@ -588,9 +682,12 @@ export default function App() {
       else next.add(tag);
       return next;
     });
+    // 筛选变化会隐藏节点，清空选中避免光标悬在不可见节点上造成困惑
+    setSelectedIds(new Set());
+    setSelectedEdgeIds(new Set());
   };
 
-  const handleRemoveNode = (id: string) => {
+  const handleRemoveNode = useCallback((id: string) => {
     beginTransaction();
     setNodes(prev => prev.filter(n => n.id !== id));
     setEdges(prev => prev.filter(e => e.source !== id && e.target !== id));
@@ -599,18 +696,97 @@ export default function App() {
       next.delete(id);
       return next;
     });
-  };
+  }, [beginTransaction]);
 
-  const handleUpdateNode = (id: string, updates: Partial<NodeData>) => {
+  const handleUpdateNode = useCallback((id: string, updates: Partial<NodeData>) => {
     setNodes(prev => prev.map(n => n.id === id ? { ...n, ...updates } : n));
+  }, []);
+
+  const updateEdge = useCallback((id: string, updates: Partial<EdgeData>) => {
+    setEdges(prev => prev.map(e => e.id === id ? { ...e, ...updates } : e));
+  }, []);
+
+  // 手动设置单条边的关系说明（空字符串 = 清除 label）
+  const handleUpdateEdgeLabel = (edgeId: string, label: string) => {
+    beginTransaction();
+    updateEdge(edgeId, { label: label || undefined });
   };
 
-  const handleBringToFront = (id: string) => {
-    setMaxZ(prev => prev + 1);
-    handleUpdateNode(id, { zIndex: maxZ + 1 });
+  // 共享：对给定连线集合跑 AI，构建逐条可编辑的提案
+  const runAiLabeling = async (targets: EdgeData[]) => {
+    if (targets.length === 0) return;
+    setIsLabeling(true);
+    setEdgeProposals(null);
+    try {
+      const res = await fetch('/api/llm/edge-relations', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodes: activeNodes, edges: targets }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !Array.isArray(data.relations)) {
+        alert(data.error || 'AI 标注失败');
+        return;
+      }
+      const byId = new Map(activeNodes.map((n) => [n.id, n]));
+      const maxId = new Set(edges.map((e) => e.id));
+      const proposals: EdgeProposal[] = data.relations
+        .filter((r: any) => r && r.label && maxId.has(r.edgeId))
+        .map((r: any) => {
+          const edgeE = edges.find((e) => e.id === r.edgeId);
+          const src = edgeE ? byId.get(edgeE.source) : undefined;
+          const tgt = edgeE ? byId.get(edgeE.target) : undefined;
+          const name = (n?: NodeData) => (n ? (n.type === 'text' ? String(n.content || '').replace(/<[^>]*>/g, ' ').trim().slice(0, 14) : n.type) : '?');
+          return { edgeId: r.edgeId, label: String(r.label).slice(0, 40), desc: `${name(src)} → ${name(tgt)}` };
+        });
+      setEdgeProposals(proposals);
+    } catch (e) {
+      console.error(e);
+      alert('调用 AI 标注失败，请检查服务与 LLM 配置');
+    } finally {
+      setIsLabeling(false);
+    }
   };
 
-  const handleSelectNode = (id: string, multi: boolean) => {
+  // 工具栏：为全板无说明的连线生成关系（添加到全部）
+  const handleAiLabelEdges = () => {
+    const targets = activeEdges.filter((e) => !e.label);
+    if (targets.length === 0) {
+      alert('没有需要标注的连线');
+      return;
+    }
+    runAiLabeling(targets);
+  };
+
+  // 卡片：仅为当前选中的这一条边生成关系
+  const handleAiLabelEdge = (edgeId: string) => {
+    const target = activeEdges.find((e) => e.id === edgeId);
+    if (target) runAiLabeling([target]);
+  };
+
+  const handleChangeEdgeProposal = (edgeId: string, label: string) => {
+    setEdgeProposals((prev) => (prev ? prev.map((p) => (p.edgeId === edgeId ? { ...p, label } : p)) : prev));
+  };
+
+  const applyEdgeProposals = () => {
+    if (!edgeProposals) return;
+    beginTransaction();
+    edgeProposals.forEach((p) => updateEdge(p.edgeId, { label: p.label.trim() || undefined }));
+    setEdgeProposals(null);
+  };
+
+  const cancelEdgeProposals = () => setEdgeProposals(null);
+
+  // 关闭边操作卡片（取消边选中即可隐藏，且不影响 AI 提案）
+  const handleDismissEdge = () => setSelectedEdgeIds(new Set());
+
+  const handleBringToFront = useCallback((id: string) => {
+    const next = (maxZRef.current += 1);
+    setMaxZ(next);
+    handleUpdateNode(id, { zIndex: next });
+  }, [handleUpdateNode]);
+
+  const handleSelectNode = useCallback((id: string, multi: boolean) => {
     setSelectedIds(prev => {
       const next = new Set(multi ? prev : []);
       if (next.has(id)) {
@@ -623,9 +799,9 @@ export default function App() {
     if (!multi) {
       setSelectedEdgeIds(new Set());
     }
-  };
+  }, []);
 
-  const handleSelectEdge = (id: string, multi: boolean) => {
+  const handleSelectEdge = useCallback((id: string, multi: boolean) => {
     setSelectedEdgeIds(prev => {
       const next = new Set(multi ? prev : []);
       if (next.has(id)) {
@@ -638,11 +814,11 @@ export default function App() {
     if (!multi) {
       setSelectedIds(new Set());
     }
-  };
+  }, []);
 
-  const handleLinkClick = (id: string) => {
+  const handleLinkClick = useCallback((id: string) => {
     if (!isLinking) return;
-    
+
     if (!linkSource) {
       setLinkSource(id);
     } else {
@@ -657,7 +833,7 @@ export default function App() {
       setLinkSource(null);
       setIsLinking(false);
     }
-  };
+  }, [isLinking, linkSource, beginTransaction]);
 
   const toggleLinking = () => {
     setIsLinking(!isLinking);
@@ -685,8 +861,8 @@ export default function App() {
     return pt.wx >= n.x && pt.wx <= n.x + w && pt.wy >= n.y && pt.wy <= n.y + h;
   }, []);
 
-  const handleDragEdgeStart = (e: React.PointerEvent, sourceId: string) => {
-    if (isLinking) return;
+  const handleDragEdgeStart = useCallback((e: React.PointerEvent, sourceId: string) => {
+    if (isLinkingRef.current) return;
     e.stopPropagation();
     beginTransaction();
     const toWorld = (cx: number, cy: number) => ({ wx: (cx - x.get()) / scale.get(), wy: (cy - y.get()) / scale.get() });
@@ -701,7 +877,7 @@ export default function App() {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       const pt = toWorld(up.clientX, up.clientY);
-      const hit = nodes.find((n) => n.id !== sourceId && ptInside(pt, n));
+      const hit = nodesRef.current.find((n) => n.id !== sourceId && ptInside(pt, n));
       setDragEdge(null);
       if (hit) {
         // 落在另一节点上 → 直接建立连线
@@ -713,7 +889,7 @@ export default function App() {
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  };
+  }, [x, y, scale, beginTransaction]);
 
   const createConnectedNode = (type: NodeType) => {
     if (!dragNewMenu) return;
@@ -725,7 +901,7 @@ export default function App() {
       : type === 'image' ? '' : '';
     setNodes(prev => [...prev, {
       id, type, x: nx - 75, y: ny - 40, content: defaultContent,
-      color: 'rgba(255,255,255,0.95)',
+      color: randomNodeColor(),
       width: type === 'image' ? 400 : 300, height: type === 'image' ? 300 : undefined,
       zIndex: maxZ + 1,
     }]);
@@ -906,8 +1082,8 @@ export default function App() {
   }, []);
 
   // Pan/zoom so the reorganized nodes fit comfortably in the viewport.
-  const fitViewport = (positions: { id: string; x: number; y: number }[]) => {
-    const rects = nodes.map(n => {
+  const fitViewport = (positions: { id: string; x: number; y: number }[], nodeList: NodeData[] = nodes) => {
+    const rects = nodeList.map(n => {
       const p = positions.find(q => q.id === n.id);
       return {
         x: p ? p.x : n.x,
@@ -961,6 +1137,27 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 标签筛选 → 当前"可见子集"。未筛选时 = 全量；筛选时隐藏不匹配节点（非淡化）。
+  const activeNodes = useMemo(() => {
+    if (selectedTags.size === 0) return nodes;
+    const tags = Array.from(selectedTags);
+    return nodes.filter((n) => tags.every((t) => (n.tags || []).includes(t)));
+  }, [nodes, selectedTags]);
+  // 可见子集的边：两端点都在子集内才保留
+  const activeEdges = useMemo(() => {
+    const ids = new Set(activeNodes.map((n) => n.id));
+    return edges.filter((e) => ids.has(e.source) && ids.has(e.target));
+  }, [edges, activeNodes]);
+
+  // 标签磁贴条数据：基于全量节点的标签计数（提供全貌），按数量降序
+  const tagList = useMemo(() => {
+    const map = new Map<string, number>();
+    nodes.forEach((n) => (n.tags || []).forEach((t) => map.set(t, (map.get(t) || 0) + 1)));
+    return Array.from(map.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => b.count - a.count);
+  }, [nodes]);
+
   // 视口剔除：只渲染视口（含外延）内的节点，支撑千级节点流畅度
   const visibleNodes = useMemo(() => {
     const mx = x.get();
@@ -971,13 +1168,13 @@ export default function App() {
     const y0 = (-my) / ms - margin / ms;
     const x1 = (viewportSize.w - mx) / ms + margin / ms;
     const y1 = (viewportSize.h - my) / ms + margin / ms;
-    return nodes.filter((n) => {
+    return activeNodes.filter((n) => {
       const w = n.width || (n.type === 'image' ? 400 : n.type === 'table' || n.type === 'chart' ? 480 : n.type === 'markdown' ? 420 : 300);
       const h = n.height || (n.type === 'image' ? 300 : n.type === 'table' ? 360 : n.type === 'markdown' ? 320 : 200);
       return n.x < x1 && n.x + w > x0 && n.y < y1 && n.y + h > y0;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, viewportTick, viewportSize]);
+  }, [activeNodes, viewportTick, viewportSize]);
 
   const handleAiOrganize = async () => {
     setIsOrganizing(true);
@@ -985,7 +1182,8 @@ export default function App() {
       const response = await fetch('/api/organize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes, edges })
+        // 筛选激活时只整理当前可见子集，否则整理全量
+        body: JSON.stringify({ nodes: activeNodes, edges: activeEdges })
       });
 
       const data = await response.json();
@@ -1005,17 +1203,24 @@ export default function App() {
           zIndex: maxZ + 1,
         }));
         setMaxZ((prev) => prev + 1);
-        setNodes(prev => [
-          ...prev.map(n => {
-            const newPos = data.positions.find((p: any) => p.id === n.id);
-            if (newPos) {
-              return { ...n, x: newPos.x, y: newPos.y };
-            }
-            return n;
-          }),
-          ...labelNodes,
-        ]);
-        fitViewport(data.positions);
+        // 应用新位置 + 自动打标：每个组把组主题名写为该组内所有节点的标签（去重）
+        const tagByNode = new Map<string, string>();
+        (data.groups || []).forEach((g: any) =>
+          (Array.isArray(g.nodeIds) ? g.nodeIds : []).forEach((id: string) => {
+            if (typeof g.name === 'string' && g.name.trim()) tagByNode.set(id, g.name.trim());
+          })
+        );
+        setNodes(prev => prev.map(n => {
+          const newPos = data.positions.find((p: any) => p.id === n.id);
+          const gname = tagByNode.get(n.id);
+          let next = newPos ? { ...n, x: newPos.x, y: newPos.y } : n;
+          if (gname) {
+            const cur = n.tags || [];
+            if (!cur.includes(gname)) next = { ...next, tags: [...cur, gname] };
+          }
+          return next;
+        }).concat(labelNodes));
+        fitViewport(data.positions, activeNodes);
       } else {
         alert(data.error || "Failed to organize nodes");
       }
@@ -1052,6 +1257,44 @@ export default function App() {
     setSelectedIds(new Set([newNode.id]));
     setSelectedEdgeIds(new Set());
     setStoryNodeId(newNode.id);
+  };
+
+  // 新建「子集总结」文本节点：描述某个筛选子集的信息，并标注这是子集总结。
+  // 与看板故事线不同，这个节点不挂故事控制条，用 emerald 色相区分。
+  const addSubsetSummaryNode = (summary: string, label: string) => {
+    beginTransaction();
+    // 以筛选子集（activeNodes）为锚点，把总结节点放在子集右下角
+    const set = activeNodes;
+    const maxX = set.length ? Math.max(...set.map((n) => n.x + (n.width || 300))) : 0;
+    const minX = set.length ? Math.min(...set.map((n) => n.x)) : 0;
+    const minY = set.length ? Math.min(...set.map((n) => n.y)) : 0;
+    const maxY = set.length ? Math.max(...set.map((n) => n.y + (n.height || 200))) : 0;
+
+    const estimatedLines = Math.max(1, Math.ceil(summary.length / 42));
+    const newNode: NodeData = {
+      id: Math.random().toString(36).substring(7),
+      type: 'text',
+      x: maxX + 80,
+      y: maxY + 60,
+      content: `<p><b>「${escapeHtml(label || '筛选')}」子集总结</b></p>${textToHtml(summary)}`,
+      color: 'rgba(236, 253, 245, 0.95)', // emerald-50 tint to mark an AI subset summary
+      width: 420,
+      height: Math.min(640, Math.max(240, estimatedLines * 24 + 120)),
+      zIndex: maxZ + 1,
+    };
+    setMaxZ((prev) => prev + 1);
+    setNodes((prev) => [...prev, newNode]);
+    setSelectedIds(new Set([newNode.id]));
+    setSelectedEdgeIds(new Set());
+    // 清空筛选，让这个没有标签的总结节点立刻可见
+    setSelectedTags(new Set());
+    // 把视图中心带到新总结节点上，让用户直接看到结果
+    const nodeW = newNode.width || 420;
+    const nodeH = newNode.height || 240;
+    const cx = newNode.x + nodeW / 2;
+    const cy = newNode.y + nodeH / 2;
+    x.set(-cx * scale.get() + window.innerWidth / 2);
+    y.set(-cy * scale.get() + window.innerHeight / 2);
   };
 
   // Drop the story-control bar if the story node is deleted.
@@ -1140,8 +1383,8 @@ export default function App() {
   };
 
   // ---- AI 生成图表：读取表格数据 → /api/llm/chart → 在表格右侧创建 chart 节点 ----
-  const handleGenerateChart = async (tableNodeId: string) => {
-    const table = nodes.find((n) => n.id === tableNodeId);
+  const handleGenerateChart = useCallback(async (tableNodeId: string) => {
+    const table = nodesRef.current.find((n) => n.id === tableNodeId);
     if (!table || !table.tableData || table.tableData.length < 2) {
       alert('表格至少需要表头 + 一行数据才能生成图表');
       return;
@@ -1168,7 +1411,7 @@ export default function App() {
           color: 'rgba(255, 255, 255, 0.95)',
           width: 480,
           height: 360,
-          zIndex: maxZ + 1,
+          zIndex: (maxZRef.current += 1),
           chartConfig: {
             chartType: data.chartType,
             sourceTableId: tableNodeId,
@@ -1191,7 +1434,7 @@ export default function App() {
     } finally {
       setGeneratingChartId(null);
     }
-  };
+  }, [beginTransaction]);
 
   const handleAiSummarize = async () => {
     setIsSummarizing(true);
@@ -1204,11 +1447,11 @@ export default function App() {
           flushSync(() => el.blur());
         }
       }
-      const snap = stateRef.current;
       const response = await fetch('/api/summarize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodes: snap.nodes, edges: snap.edges }),
+        // 筛选激活时只总结当前可见子集，否则总结全量
+        body: JSON.stringify({ nodes: activeNodes, edges: activeEdges }),
       });
       const data = await response.json();
       if (response.ok && data.summary) {
@@ -1219,6 +1462,41 @@ export default function App() {
     } catch (e) {
       console.error(e);
       alert("调用 AI 总结失败，请检查服务与 LLM 配置");
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  // 总结「筛选子集」：走与直接 AI Story 不同的简述提示词，并新建一个标注为子集总结的文本节点。
+  const handleAiSummarizeSubset = async () => {
+    setIsSummarizing(true);
+    try {
+      if (document.activeElement instanceof HTMLElement) {
+        const el = document.activeElement;
+        if (el.isContentEditable || el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+          flushSync(() => el.blur());
+        }
+      }
+      const label = Array.from(selectedTags).join('、') || '筛选';
+      const response = await fetch('/api/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nodes: activeNodes,
+          edges: activeEdges,
+          mode: 'subset',
+          subsetLabel: label,
+        }),
+      });
+      const data = await response.json();
+      if (response.ok && data.summary) {
+        addSubsetSummaryNode(data.summary, label);
+      } else {
+        alert(data.error || "AI 子集总结失败");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("调用 AI 子集总结失败，请检查服务与 LLM 配置");
     } finally {
       setIsSummarizing(false);
     }
@@ -1254,8 +1532,17 @@ export default function App() {
       return;
     }
 
-    // Left-drag on empty space = marquee selection.
+    // Left-click / drag on empty space.
     if (e.button === 0) {
+      // 单击空白处取消全部选中（节点 + 边，关闭选中态/操作卡片）。
+      // Shift / Ctrl 等为「追加框选」模式，保留已有节点选中以支持多选。
+      const additive = e.shiftKey || e.metaKey || e.ctrlKey;
+      if (!additive) {
+        setSelectedIds(new Set());
+        setSelectedEdgeIds(new Set());
+      } else if (selectedEdgeIds.size > 0) {
+        setSelectedEdgeIds(new Set());
+      }
       const toWorld = (cx: number, cy: number) => ({
         wx: (cx - x.get()) / scale.get(),
         wy: (cy - y.get()) / scale.get(),
@@ -1306,13 +1593,13 @@ export default function App() {
     >
       <motion.div
         style={{ x, y, scale }}
-        className="absolute origin-top-left w-full h-full pointer-events-none"
+        className="absolute origin-top-left w-full h-full pointer-events-none will-change-transform"
       >
         <div className="absolute top-[-50000px] left-[-50000px] w-[100000px] h-[100000px] canvas-bg pointer-events-none" />
 
         <EdgeLayer
-          nodes={nodes}
-          edges={edges}
+          nodes={activeNodes}
+          edges={activeEdges}
           selectedEdgeIds={selectedEdgeIds}
           onSelectEdge={handleSelectEdge}
           dragEdge={dragEdge}
@@ -1332,9 +1619,6 @@ export default function App() {
 
         <div className="absolute inset-0 pointer-events-none *:pointer-events-auto">
           {visibleNodes.map(node => {
-            // 标签筛选：非空筛选时，不匹配的节点淡化
-            const dimmed = selectedTags.size > 0 &&
-              !(Array.from(selectedTags).every(t => (node.tags || []).includes(t)));
             return (
               <CanvasNode
                 key={node.id}
@@ -1348,7 +1632,6 @@ export default function App() {
                 onLinkClick={handleLinkClick}
                 onTransactionStart={beginTransaction}
                 onDragEdgeStart={handleDragEdgeStart}
-                dimmed={dimmed}
                 onGenerateChart={handleGenerateChart}
                 isGeneratingChart={generatingChartId === node.id}
               />
@@ -1433,6 +1716,9 @@ export default function App() {
         {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
       </button>
 
+      {/* 标签磁贴条（左上角，单击即筛） */}
+      <TagRibbon tags={tagList} selectedTags={selectedTags} onToggleTag={handleToggleTag} />
+
       <Toolbar
         onAdd={handleAddNode}
         isLinking={isLinking}
@@ -1448,6 +1734,9 @@ export default function App() {
         isOrganizing={isOrganizing}
         onAiSummarize={handleAiSummarize}
         isSummarizing={isSummarizing}
+        onLabelEdges={handleAiLabelEdges}
+        isLabeling={isLabeling}
+        canLabel={edges.length > 0}
         onClear={handleDeleteSelected}
         hasSelection={selectedIds.size > 0 || selectedEdgeIds.size > 0}
         onOpenSettings={() => setIsSettingsOpen(true)}
@@ -1473,6 +1762,18 @@ export default function App() {
         />
       )}
 
+      <EdgeActionCard
+        edge={selectedEdgeIds.size === 1 ? edges.find((e) => selectedEdgeIds.has(e.id)) || null : null}
+        proposals={edgeProposals}
+        isLabeling={isLabeling}
+        onUpdateLabel={handleUpdateEdgeLabel}
+        onRunAi={handleAiLabelEdge}
+        onChangeProposal={handleChangeEdgeProposal}
+        onApplyProposals={applyEdgeProposals}
+        onCancelProposals={cancelEdgeProposals}
+        onDismiss={handleDismissEdge}
+      />
+
       <SettingsModal open={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
 
       <TemplateModal
@@ -1487,6 +1788,9 @@ export default function App() {
         nodes={nodes}
         edges={edges}
         currentPageName={pages.find((p) => p.id === currentPageId)?.name || ''}
+        messages={chatByPage[currentPageId] ?? []}
+        onChangeMessages={handleChatChange}
+        onClear={handleClearChat}
         onInsertNode={handleInsertAiNode}
       />
 
@@ -1496,6 +1800,10 @@ export default function App() {
         nodes={nodes}
         selectedTags={selectedTags}
         onToggleTag={handleToggleTag}
+        onAiOrganize={handleAiOrganize}
+        isOrganizing={isOrganizing}
+        onAiSummarize={handleAiSummarizeSubset}
+        isSummarizing={isSummarizing}
       />
 
       <SuggestPanel

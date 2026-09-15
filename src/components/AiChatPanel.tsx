@@ -1,8 +1,12 @@
 // AI 对话侧边栏：与看板对话（SSE 流式输出），可让 AI 总结/扩写/生成新节点。
-// AI chat sidebar — talk to your board with SSE streaming; can summarize, elaborate or create nodes.
+// 消息状态由父组件（App）按画布分桶管理；本组件为受控组件，仅负责渲染与流式交互。
+// AI chat sidebar — talk to your board with SSE streaming. Messages are owned by the parent
+// (per-canvas); this is a controlled component for rendering + streaming only.
 import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { X, Send, Loader2, Sparkles, Square, MessageSquare } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { X, Send, Loader2, Sparkles, Square, MessageSquare, Trash2 } from 'lucide-react';
 import { NodeData, EdgeData, ChatMessage, NodeType } from '../types';
 
 interface Props {
@@ -11,9 +15,29 @@ interface Props {
   nodes: NodeData[];
   edges: EdgeData[];
   currentPageName: string;
+  /** 当前画布的完整对话（受控） */
+  messages: ChatMessage[];
+  /** 提交新的完整对话 */
+  onChangeMessages: (msgs: ChatMessage[]) => void;
+  /** 清空当前画布对话（由父组件执行、指向当前看板） */
+  onClear: () => void;
   /** AI 生成新节点 */
   onInsertNode: (type: NodeType, content: string) => void;
 }
+
+// Markdown 富文本渲染：复用全局 prose 排版（与 Markdown 节点一致），外链新窗口打开。
+const Markdown = ({ children }: { children: string }) => (
+  <div className="prose prose-sm prose-slate max-w-none">
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ node, ...rest }) => <a {...rest} target="_blank" rel="noopener noreferrer" />,
+      }}
+    >
+      {children}
+    </ReactMarkdown>
+  </div>
+);
 
 // 纯文本提取（搜索/发送给 AI 用）
 const toPlainText = (content: string): string =>
@@ -24,8 +48,7 @@ const toPlainText = (content: string): string =>
     .replace(/\s+/g, ' ')
     .trim();
 
-export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onInsertNode }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, messages, onChangeMessages, onClear, onInsertNode }: Props) {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamText, setStreamText] = useState('');
@@ -51,13 +74,18 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
     setInput('');
     setStreamText('');
 
+    // base = 已提交对话 + 本次用户消息；流结束时把 assistant 回复追加到 base 后整体提交。
     const userMsg: ChatMessage = { role: 'user', content: text };
-    const nextMessages = [...messages, userMsg];
-    setMessages(nextMessages);
+    const base = [...messages, userMsg];
+    onChangeMessages(base);
     setStreaming(true);
     streamingRef.current = true;
     const controller = new AbortController();
     abortRef.current = controller;
+
+    // 本地累加器：实时更新显示，并在结束时提交到消息列表。
+    // 不能依赖闭包里的 streamText（它停留在渲染时旧值，导致流式内容无法提交）。
+    let committed = '';
 
     try {
       const res = await fetch('/api/llm/chat', {
@@ -65,13 +93,13 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
         headers: { 'Content-Type': 'application/json' },
         signal: controller.signal,
         body: JSON.stringify({
-          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+          messages: base.map((m) => ({ role: m.role, content: m.content })),
           context: { pageName: currentPageName, nodes, edges },
         }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        setMessages((prev) => [...prev, { role: 'assistant', content: `⚠️ ${data.error || '请求失败'}` }]);
+        onChangeMessages([...base, { role: 'assistant', content: `⚠️ ${data.error || '请求失败'}` }]);
         return;
       }
       if (!res.body) return;
@@ -92,30 +120,45 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
           try {
             const o = JSON.parse(payload);
             if (o.error) {
-              setStreamText((prev) => prev + `\n⚠️ ${o.error}`);
+              committed += `\n⚠️ ${o.error}`;
               streamingRef.current = false;
               break;
             }
             if (o.done) { streamingRef.current = false; break; }
-            if (typeof o.delta === 'string') setStreamText((prev) => prev + o.delta);
+            if (typeof o.delta === 'string') {
+              committed += o.delta;
+              setStreamText(committed);
+            }
           } catch { /* skip */ }
         }
         if (!streamingRef.current) break;
       }
+      // 流结束（含中途被 stop）时把累积内容提交为一条 assistant 消息
+      if (committed.trim()) {
+        onChangeMessages([...base, { role: 'assistant', content: committed.trim() }]);
+      }
+      setStreamText('');
     } catch (e: any) {
       if (e?.name !== 'AbortError') {
-        setMessages((prev) => [...prev, { role: 'assistant', content: '⚠️ 请求失败，请检查服务与 LLM 配置' }]);
+        onChangeMessages([...base, { role: 'assistant', content: '⚠️ 请求失败，请检查服务与 LLM 配置' }]);
       }
+    } finally {
+      setStreaming(false);
+      streamingRef.current = false;
+      abortRef.current = null;
     }
-    if (streamText) {
-      setMessages((prev) => [...prev, { role: 'assistant', content: streamText }]);
-    }
-    setStreaming(false);
-    streamingRef.current = false;
-    abortRef.current = null;
   };
 
   const stop = () => { abortRef.current?.abort(); };
+
+  const handleClear = () => {
+    if (confirm('清空当前看板的对话？')) {
+      abortRef.current?.abort();
+      setStreamText('');
+      setInput('');
+      onClear();
+    }
+  };
 
   // 快捷操作：让 AI 总结整个看板 / 扩写选中的第一个节点
   const quickSummarize = () => {
@@ -152,13 +195,24 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
                 <p className="text-[11px] text-gray-400 dark:text-gray-500">与当前看板对话 · {currentPageName}</p>
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors dark:hover:text-gray-200 dark:hover:bg-white/10"
-              title="关闭"
-            >
-              <X size={18} />
-            </button>
+            <div className="flex items-center gap-1">
+              {messages.length > 0 && (
+                <button
+                  onClick={handleClear}
+                  className="p-1.5 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors dark:hover:text-red-400 dark:hover:bg-red-500/10"
+                  title="清空对话"
+                >
+                  <Trash2 size={16} />
+                </button>
+              )}
+              <button
+                onClick={onClose}
+                className="p-1.5 rounded-lg text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors dark:hover:text-gray-200 dark:hover:bg-white/10"
+                title="关闭"
+              >
+                <X size={18} />
+              </button>
+            </div>
           </div>
 
           {/* Messages */}
@@ -173,20 +227,20 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
             {messages.map((m, i) => (
               <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div
-                  className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm whitespace-pre-wrap break-words ${
+                  className={`max-w-[85%] px-3.5 py-2.5 rounded-2xl text-sm shadow-sm ${
                     m.role === 'user'
-                      ? 'bg-blue-500 text-white rounded-br-md'
-                      : 'bg-black/5 text-gray-700 rounded-bl-md dark:bg-white/10 dark:text-gray-200'
+                      ? 'bg-gradient-to-br from-indigo-500 to-violet-500 text-white rounded-br-md whitespace-pre-wrap break-words'
+                      : 'bg-white/60 border border-black/5 text-gray-700 rounded-bl-md dark:bg-white/5 dark:border-white/10 dark:text-gray-200'
                   }`}
                 >
-                  {m.content}
+                  {m.role === 'user' ? m.content : <Markdown>{m.content}</Markdown>}
                 </div>
               </div>
             ))}
             {streaming && (
               <div className="flex justify-start">
-                <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-bl-md text-sm whitespace-pre-wrap break-words bg-black/5 text-gray-700 dark:bg-white/10 dark:text-gray-200">
-                  {streamText}
+                <div className="max-w-[85%] px-3.5 py-2.5 rounded-2xl rounded-bl-md text-sm shadow-sm bg-white/60 border border-black/5 text-gray-700 dark:bg-white/5 dark:border-white/10 dark:text-gray-200">
+                  <Markdown>{streamText}</Markdown>
                   <span className="inline-block w-1.5 h-4 ml-0.5 bg-emerald-500 align-text-bottom animate-pulse" />
                 </div>
               </div>
@@ -213,7 +267,7 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, onIn
 
           {/* Input */}
           <div className="p-4 pt-2">
-            <div className="flex items-end gap-2 bg-black/5 rounded-xl p-2 dark:bg-white/10">
+            <div className="flex items-end gap-2 bg-white/70 border border-black/5 rounded-xl p-2 dark:bg-white/10 dark:border-white/10">
               <textarea
                 ref={inputRef}
                 value={input}

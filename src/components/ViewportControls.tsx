@@ -16,7 +16,7 @@ export function ViewportControls({ onZoomIn, onZoomOut, onFit, onReset }: Props)
       initial={{ opacity: 0, scale: 0.9 }}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ type: 'spring', stiffness: 300, damping: 25, delay: 0.3 }}
-      className="fixed right-8 bottom-[180px] z-50 flex flex-col items-center gap-0.5 p-1.5 bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-xl dark:bg-gray-900/80 dark:border-white/10"
+      className="fixed right-8 bottom-[220px] z-50 flex flex-col items-center gap-0.5 p-1.5 bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-xl dark:bg-gray-900/80 dark:border-white/10"
     >
       <button
         onClick={onZoomIn}

@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, LlmError } from "./server/llm";
 
 dotenv.config();
 
@@ -113,13 +113,15 @@ async function startServer() {
       if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
         return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
       }
-      const { nodes, edges, instruction, style } = req.body;
+      const { nodes, edges, instruction, style, mode, subsetLabel } = req.body;
       if (!nodes || !Array.isArray(nodes)) {
         return res.status(400).json({ error: "Invalid nodes data." });
       }
       const summary = await summarizeBoard(nodes, edges || [], cfg, {
         instruction: typeof instruction === "string" ? instruction : undefined,
         style: typeof style === "string" ? style : undefined,
+        mode: mode === "subset" ? "subset" : "board",
+        subsetLabel: typeof subsetLabel === "string" ? subsetLabel : undefined,
       });
       res.json({ summary });
     } catch (error) {
@@ -156,7 +158,8 @@ async function startServer() {
             .trim()
             .slice(0, 200);
         }
-        return `- [${n.type || 'text'}] (id=${n.id}) ${t}`;
+        const tagText = Array.isArray(n.tags) && n.tags.length ? `[标签:${n.tags.slice(0, 5).join(',')}] ` : '';
+        return `- [${n.type || 'text'}] (id=${n.id}) ${tagText}${t}`;
       })
       .join('\n');
     const edgeText = (Array.isArray(ctx.edges) ? ctx.edges : [])
@@ -200,6 +203,25 @@ async function startServer() {
         res.write(`data: ${JSON.stringify({ error: msg, done: true })}\n\n`);
         res.end();
       }
+    }
+  });
+
+  // ---- AI Edge Relations (propose relationship labels for edges) ----
+  app.post("/api/llm/edge-relations", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM" });
+      }
+      const { nodes, edges } = req.body || {};
+      if (!Array.isArray(nodes) || !Array.isArray(edges)) {
+        return res.status(400).json({ error: "Invalid nodes or edges data" });
+      }
+      const result = await llmProposeEdgeRelations(cfg, nodes, edges);
+      res.json(result);
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
     }
   });
 

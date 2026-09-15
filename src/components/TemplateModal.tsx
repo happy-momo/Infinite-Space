@@ -50,8 +50,8 @@ export function TemplateModal({ open, onClose, onSelect }: Props) {
                   <LayoutTemplate size={15} />
                 </span>
                 <div>
-                  <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">新建画布</h2>
-                  <p className="text-[11px] text-gray-400 dark:text-gray-500">选择一个模板开始</p>
+                  <h2 className="text-sm font-semibold text-gray-800 dark:text-gray-100">New Canvas</h2>
+                  <p className="text-[11px] text-gray-400 dark:text-gray-500">Pick a template to start, or a blank slate</p>
                 </div>
               </div>
               <button

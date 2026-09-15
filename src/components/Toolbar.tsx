@@ -3,7 +3,7 @@
 // Bottom toolbar — node creation, undo/redo, linking, AI actions, import/export and settings.
 import React from 'react';
 import { motion } from 'motion/react';
-import { Type, Image as ImageIcon, Link, Sparkles, Link2, Trash2, Settings, BookOpenText, Undo2, Redo2, Download, Upload, FileCode2, MessageSquare, Tag, Lightbulb, Table2 } from 'lucide-react';
+import { Type, Image as ImageIcon, Link, Sparkles, Link2, Trash2, Settings, BookOpenText, Undo2, Redo2, Download, Upload, FileCode2, MessageSquare, Tag, Lightbulb, Table2, ArrowRightLeft } from 'lucide-react';
 import { NodeType } from '../types';
 
 interface Props {
@@ -21,6 +21,10 @@ interface Props {
   isOrganizing: boolean;
   onAiSummarize: () => void;
   isSummarizing: boolean;
+  /** AI 为无说明的连线生成关系（工具栏入口） */
+  onLabelEdges: () => void;
+  isLabeling: boolean;
+  canLabel: boolean;
   onClear: () => void;
   hasSelection?: boolean;
   onOpenSettings: () => void;
@@ -32,7 +36,7 @@ interface Props {
   onImport: () => void;
 }
 
-export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOpen, onToggleSearch, onToggleTagPanel, isTagPanelOpen, onToggleSuggest, hasSingleSelection, onAiOrganize, isOrganizing, onAiSummarize, isSummarizing, onClear, hasSelection, onOpenSettings, onUndo, onRedo, canUndo, canRedo, onExport, onImport }: Props) {
+export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOpen, onToggleSearch, onToggleTagPanel, isTagPanelOpen, onToggleSuggest, hasSingleSelection, onAiOrganize, isOrganizing, onAiSummarize, isSummarizing, onLabelEdges, isLabeling, canLabel, onClear, hasSelection, onOpenSettings, onUndo, onRedo, canUndo, canRedo, onExport, onImport }: Props) {
   return (
     <motion.div
       initial={{ y: 100, opacity: 0 }}
@@ -96,6 +100,14 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOp
         <BookOpenText size={16} className={isSummarizing ? "animate-pulse" : ""} />
         {isSummarizing ? "Summarizing..." : "AI Story"}
       </button>
+
+      <ToolButton
+        icon={<ArrowRightLeft size={20} />}
+        label="标注关系"
+        onClick={onLabelEdges}
+        disabled={!canLabel || isLabeling}
+        activeColor="text-sky-600 bg-sky-50"
+      />
 
       <div className="w-px h-6 bg-gray-200 mx-2 dark:bg-white/10" />
 

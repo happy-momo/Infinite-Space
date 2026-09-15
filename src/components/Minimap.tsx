@@ -2,7 +2,7 @@
 // Minimap — overview of the whole canvas; click or drag to teleport the viewport.
 import { motion, MotionValue } from "motion/react";
 import { NodeData } from "../types";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface Props {
   nodes: NodeData[];
@@ -13,12 +13,27 @@ interface Props {
 
 export function Minimap({ nodes, x, y, scale }: Props) {
   const [viewState, setViewState] = useState({ x: x.get(), y: y.get(), s: scale.get() });
+  const pendingRef = useRef({ x: x.get(), y: y.get(), s: scale.get() });
 
+  // 性能：把高频的 pan/zoom change 事件合帧到下一帧再更新，避免以 60fps 触发 React 渲染。
   useEffect(() => {
-    const unsubX = x.on("change", (v) => setViewState(p => ({ ...p, x: v })));
-    const unsubY = y.on("change", (v) => setViewState(p => ({ ...p, y: v })));
-    const unsubS = scale.on("change", (v) => setViewState(p => ({ ...p, s: v })));
-    return () => { unsubX(); unsubY(); unsubS(); };
+    const pending = pendingRef.current;
+    let raf = 0;
+    const schedule = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        const { x: px, y: py, s: ps } = pending;
+        setViewState({ x: px, y: py, s: ps });
+      });
+    };
+    const unsubX = x.on("change", (v) => { pending.x = v; schedule(); });
+    const unsubY = y.on("change", (v) => { pending.y = v; schedule(); });
+    const unsubS = scale.on("change", (v) => { pending.s = v; schedule(); });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      unsubX(); unsubY(); unsubS();
+    };
   }, [x, y, scale]);
 
   // Map limits
