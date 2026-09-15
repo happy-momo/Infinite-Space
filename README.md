@@ -20,11 +20,11 @@
 
 ---
 
-**Infinite Space** turns a blank browser tab into a thinking playground: drop **text, images, and links** anywhere on a seamless infinite canvas, connect them into a web of ideas, organize them across **multiple pages**, and let an **LLM of your choice** declutter the board or weave it into a narrative — in one click.
+**Infinite Space** turns a blank browser tab into a thinking playground: drop **text, images, links, Markdown, tables, and charts** anywhere on a seamless infinite canvas, connect them into a web of ideas, organize them across **multiple pages** with **tags**, and let an **LLM of your choice** declutter the board, weave it into a narrative, or chat with it — in one click.
 
 - **Bring your own LLM** — works with any OpenAI-compatible endpoint (Zhipu GLM, OpenAI, DeepSeek, Groq, OpenRouter, Ollama…). Your API key is stored server-side and **never exposed to the browser**.
-- **AI that understands your board** — *AI Organize* groups related nodes and lays them out with labeled clusters; *AI Story* summarizes the whole board into a coherent storyline node you can regenerate in different styles.
-- **Local-first** — your canvas lives in your browser's localStorage; an optional Express backend adds server persistence, LLM proxying, and link-metadata enrichment.
+- **AI that understands your board** — *AI Organize* groups related nodes and lays them out with labeled clusters; *AI Story* writes a storyline you can regenerate in styles; *AI Chat* talks to the whole canvas; *AI 联想* suggests related nodes; *AI 标注关系* names your connections.
+- **Local-first, optionally full-stack** — your canvas lives in your browser's localStorage; an optional Express backend adds server persistence, LLM proxying, and link-metadata enrichment. A pure static (zero-backend) build of this code is also published live on GitHub Pages.
 
 > 🌐 **Try it online:** open the local-first, no-backend live build → **[https://happy-momo.github.io/Infinite/](https://happy-momo.github.io/Infinite/)**
 
@@ -37,11 +37,20 @@
 | 🗺️ **Boundless canvas** | Smooth pan/zoom (Space+drag, middle mouse, scroll), minimap, fit-to-content |
 | 📝 **Rich text nodes** | Double-click to edit, inline bold, font family + size picker, storybook prose rendering |
 | 🖼️ **Image nodes** | Paste/upload images; automatic compression to WebP ≤1600px so the canvas stays fast |
+| 📄 **Markdown nodes** | Live-rendered prose with code blocks & syntax highlighting, editable inline |
+| 📊 **Table nodes** | Inline spreadsheet editor — plug an LLM in and **generate a chart** from your data |
+| 📈 **Chart nodes** | Bar / line / pie auto-drawn from a table by your LLM |
 | 🔗 **Link cards** | Smart cards with display text + URL; **auto-fetch title & favicon** from the target page |
-| ⛓️ **Connections** | Draw links between any nodes with a dedicated linking tool |
+| ⛓️ **Connections** | Draw links between any nodes (drag from an edge handle or the connect tool), each with an editable **relationship label** |
+| 🏷️ **Tags** | Tag nodes, ribbon + filter panel, composite filtering, and run AI actions on a filtered subset |
 | 🗂️ **Multiple pages** | Tabbed workspaces — separate canvases, each with its own nodes, edges and viewport |
 | ✨ **AI Organize** | LLM clusters related items and applies a clean, labeled layout; board auto-fits viewport |
 | 📖 **AI Story** | Turns the whole board into a storyline; regenerate in styles like *detailed*, *concise*, *storyteller*, *formal*, *English* — or add your own instruction |
+| 💬 **AI Chat** | Streams a conversation about the current board (SSE, cancellable) — summarize, expand, or draft ideas |
+| 💡 **AI 联想** | Semantic suggestions for the selected node; jump or connect with one click, cached per node |
+| 🏷️ **AI 标注关系** | One click labels every unlabeled connection with a short relationship description |
+| 🔍 **Search** | Type-ahead search across pages (`Cmd/Ctrl+F`) |
+| 📄 **Templates** | One-click starter boards from a gallery |
 | 🧠 **BYO-LLM** | Any OpenAI-compatible model; configure in-app, test connectivity, key stored masked server-side |
 | ↩️ **Undo / Redo** | Full history for every operation (drags, edits, deletes, AI actions) |
 | ⌨️ **Keyboard-first** | Shortcuts for undo/redo, copy/paste, delete, nudge, pan, marquee |
@@ -125,17 +134,26 @@ docker run -d -p 3000:3000 \
 | **Text** | Toolbar `T` | Rich text. **Double-click** to edit; `Enter` saves, `Shift+Enter` inserts a new line. Style with bold, font family (微软雅黑 / 苹方 / 宋体 / 楷体 / Serif / Mono) and font size. |
 | **Image** | Toolbar `🖼` | Upload an image; it is **auto-compressed to WebP (≤1600px)** before saving, so base64 payloads stay small. |
 | **Link** | Toolbar `🔗` | A smart link card with display text + URL. On save, the server **best-effort fetches the page's title & favicon** to enrich the card. |
+| **Markdown** | Toolbar `M` | Live-rendered GFM with code blocks & syntax highlighting; **double-click** opens the source editor. |
+| **Table** | Toolbar `⨝` | Inline spreadsheet; with an LLM configured, click **生成图表** to draw a chart beside it. |
 
 ### Connections
 
-Click the **⛓ Link** tool, then click the **source** node, then the **target** node — a connection line appears. Connections matter: **AI Story reads them** so the narrative follows the real structure of your board.
+Click the **⛓ Connect** tool, then the **source** then the **target** node — *or* hover any node and drag from one of its four **edge handles**. Connections are **endpoint-to-endpoint** with a directional arrow. Click a connection to open a small **relation card** and type a short label (e.g. 原因 / 属于 / 引用于); **AI 标注关系** can label every remaining connection automatically. Connections matter: **AI Story reads them** so the narrative follows the real structure of your board.
+
+### Tags
+
+Add a tag to any selected node via the **`+` 标签** button. The **标签面板** (Toolbar) lists every tag with counts; click tags to **composite-filter** the board (non-matching nodes are hidden), then run **AI Organize / AI Story** on just that subset, or clear the filter.
 
 ### AI features
 
-Both features use the LLM configured in **⚙️ Settings** and run **server-side** (your key never reaches the browser).
+All AI features use the LLM configured in **⚙️ Settings** and run **server-side** (your key never reaches the browser).
 
-- **✨ AI Organize** — one click. The LLM clusters related nodes, and the app lays each cluster out in a clean grid with an **auto-generated group label**, then fits the viewport so you see everything.
+- **✨ AI Organize** — one click. The LLM clusters related nodes, and the app lays each cluster out in a clean grid with an **auto-generated group label**, auto-tags members, then fits the viewport.
 - **📖 AI Story (总结)** — summarizes the current board + its connections into a narrative and drops a highlighted **storyline text node** on the canvas. Afterward a floating bar lets you **regenerate** it in a style — 详细 / 简洁 / 讲故事 / 正式 / English — or append your own instruction (e.g. *“突出 lilei 的贡献”*). The story node itself is excluded from the prompt, and the model is prompted to **never invent facts or relationships**.
+- **💬 AI Chat** — opens a sidebar and **streams** a conversation grounded in the current board; ask it to summarize, expand, or draft new nodes (`Enter` to send, `Shift+Enter` for a newline, a stop button to cancel).
+- **💡 AI 联想** — with one node selected, suggests semantically related nodes (jump or connect), **cached per node** so switching nodes doesn't wipe results.
+- **🏷️ AI 标注关系** — one click proposes short relationship labels for every unlabeled connection; review and edit each proposal before applying.
 
 ### Keyboard shortcuts
 
@@ -187,16 +205,19 @@ The Express server (default `http://127.0.0.1:3000`) exposes a small JSON API:
 
 ```
 ├── src/                     # React 19 frontend
-│   ├── App.tsx              # canvas state, history, shortcuts, AI actions
-│   ├── components/          # CanvasNode, Toolbar, Minimap, EdgeLayer, SettingsModal,
-│   │                        # StoryControls, ViewportControls, CanvasListItem
+│   ├── App.tsx              # canvas state, history, shortcuts, AI action wiring
+│   ├── components/          # CanvasNode, Toolbar, Minimap, EdgeLayer, EdgeActionCard,
+│   │                        # SettingsModal, StoryControls, SearchPanel, TagPanel, TagRibbon,
+│   │                        # PagesTree, TemplateModal, AiChatPanel, SuggestPanel,
+│   │                        # TableEditor, ChartNode, ViewportControls, CanvasListItem
 │   ├── hooks/useHistory.ts  # undo/redo snapshot stack
-│   ├── data.ts / types.ts   # seed data & shared types
+│   ├── data.ts / templates.ts / types.ts
 │   └── index.css            # Tailwind 4 + dark-mode variant
 ├── server/                  # Express backend
 │   ├── llm.ts               # OpenAI-compatible client, prompts, sanitize, grouping
 │   └── storage.ts           # atomic JSON persistence (state + llm config)
 ├── server.ts                # route wiring + dev (Vite) / prod (static) serving
+├── .github/workflows/pages.yml  # builds the static demo and deploys it to GitHub Pages
 ├── docs/superpowers/specs/  # design docs
 └── package.json
 ```
