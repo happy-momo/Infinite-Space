@@ -680,6 +680,88 @@ export default function App() {
     setSelectedEdgeIds(new Set());
   };
 
+  // AI 聊天 → 把一大段文字描述自动生成为画布上的节点 + 连线（可撤销，排版为网格）。
+  // 返回一句给 AI 助手的回执文本；失败时抛错，由聊天面板展示报错。
+  const handleGenerateBoard = async (description: string): Promise<string> => {
+    const res = await fetch('/api/llm/generate-board', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description,
+        context: {
+          pageName: pages.find((p) => p.id === currentPageId)?.name || '',
+          titles: nodes
+            .map((n) => {
+              const s = String(n.content || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+              return s.slice(0, 40);
+            })
+            .filter(Boolean)
+            .slice(0, 20),
+        },
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.board) {
+      throw new Error(data?.error || '生成失败，请检查服务与 LLM 配置');
+    }
+    const board = data.board;
+    const title = typeof board.title === 'string' ? board.title.trim() : '';
+    const genNodes: any[] = Array.isArray(board.nodes) ? board.nodes : [];
+    const genEdges: any[] = Array.isArray(board.edges) ? board.edges : [];
+    if (genNodes.length === 0) throw new Error('未能从描述中生成节点');
+
+    // 从当前视口中心附近开始，网格排版落点（带轻微错位，减少呆板）
+    const baseX = (window.innerWidth / 2 - x.get()) / scale.get() + 120;
+    const baseY = (window.innerHeight / 2 - y.get()) / scale.get() + 40;
+    const cols = Math.max(1, Math.min(5, Math.ceil(Math.sqrt(genNodes.length))));
+    const colW = 340;
+    const rowH = 236;
+
+    const newNodes: NodeData[] = genNodes.map((g: any, i: number) => {
+      const isMd = g.type === 'markdown';
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      return {
+        id: Math.random().toString(36).substring(7),
+        type: isMd ? 'markdown' : 'text',
+        x: baseX + col * colW + (row % 2) * 14,
+        y: baseY + row * rowH + (col % 2) * 18,
+        content: isMd ? String(g.content || '') : textToHtml(String(g.content || '')),
+        color: randomNodeColor(),
+        width: isMd ? 420 : 300,
+        height: isMd ? 320 : undefined,
+        zIndex: maxZ + 1 + i,
+        // 有主题时给整批节点打上同一标签，便于后续按标签筛选这组生成结果
+        ...(title ? { tags: [title] } : {}),
+      };
+    });
+
+    const ids = newNodes.map((n) => n.id);
+    const newEdges: EdgeData[] = genEdges
+      .filter(
+        (e: any) =>
+          Number.isInteger(e.from) && Number.isInteger(e.to) &&
+          e.from >= 0 && e.to >= 0 && e.from < genNodes.length && e.to < genNodes.length && e.from !== e.to,
+      )
+      .map((e: any) => ({
+        id: Math.random().toString(36).substring(7),
+        source: ids[e.from],
+        target: ids[e.to],
+        label: e.label && String(e.label).trim() ? String(e.label).trim().slice(0, 10) : undefined,
+        directed: true,
+      }));
+
+    beginTransaction();
+    setMaxZ((prev) => prev + Math.max(1, newNodes.length));
+    setNodes((prev) => [...prev, ...newNodes]);
+    setEdges((prev) => [...prev, ...newEdges]);
+    setSelectedIds(new Set());
+    setSelectedEdgeIds(new Set());
+    fitViewport(newNodes.map((n) => ({ id: n.id, x: n.x, y: n.y })), newNodes);
+
+    return `已在当前画布生成 ${newNodes.length} 个节点、${newEdges.length} 条连线${title ? `，主题「${title}」` : ''}；这些节点已自动加上标签「${title || '（无主题）'}」可筛查看全部。`;
+  };
+
   // 标签筛选：多选 AND 匹配；__clear__ 清除
   const handleToggleTag = (tag: string) => {
     if (tag === '__clear__') {
@@ -1270,23 +1352,6 @@ export default function App() {
 
       if (response.ok && data.positions) {
         beginTransaction();
-        // 只为「有切实名字」的分组生成标签，避免服务端返回空/纯空白组名时
-        // 生成看似空的小框（<p><b></b></p>）。
-        const labelNodes: NodeData[] = (data.groups || [])
-          .filter((g: any) => typeof g.name === 'string' && g.name.trim())
-          .map((g: any) => ({
-            id: Math.random().toString(36).substring(7),
-            type: 'text',
-            x: g.x,
-            y: g.y - 44,
-            content: `<p><b>${escapeHtml(g.name.trim())}</b></p>`,
-            color: 'rgba(255, 255, 255, 0.6)',
-            width: 200,
-            height: 36,
-            fontSize: 13,
-            zIndex: maxZ + 1,
-          }));
-        setMaxZ((prev) => prev + 1);
         // 应用新位置 + 自动打标：每个组把组主题名写为该组内所有节点的标签（去重）
         const tagByNode = new Map<string, string>();
         (data.groups || []).forEach((g: any) =>
@@ -1303,7 +1368,7 @@ export default function App() {
             if (!cur.includes(gname)) next = { ...next, tags: [...cur, gname] };
           }
           return next;
-        }).concat(labelNodes));
+        }));
         fitViewport(data.positions, activeNodes);
       } else {
         alert(data.error || "Failed to organize nodes");
@@ -1877,6 +1942,7 @@ export default function App() {
         onChangeMessages={handleChatChange}
         onClear={handleClearChat}
         onInsertNode={handleInsertAiNode}
+        onGenerateBoard={handleGenerateBoard}
       />
 
       <TagPanel

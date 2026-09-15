@@ -61,6 +61,15 @@ const markdownComponents = {
   },
 };
 
+// Memo 化的 Markdown 正文：内容不变就不重新解析（hover/选中触发的节点重渲染不再解析 Markdown）。
+const MarkdownBody = memo(function MarkdownBody({ content }: { content: string }) {
+  return (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      {content || '*双击以输入 Markdown…*'}
+    </ReactMarkdown>
+  );
+});
+
 const getValidUrl = (url?: string) => {
   if (!url) return '#';
   return url.match(/^https?:\/\//) ? url : `https://${url}`;
@@ -234,7 +243,18 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
     const initialNodeX = node.x;
     const initialNodeY = node.y;
     let started = false;
-
+    // RAF 合帧：pointermove 可能快于刷新率，这里把一次移动合并到下一帧，
+    // 把对 App 的 setNodes（→ 全树重渲染）从「每个事件」压到「每帧至多一次」。
+    let raf = 0;
+    let pending: { x: number; y: number } | null = null;
+    const flush = () => {
+      raf = 0;
+      if (pending) {
+        const p = pending;
+        pending = null;
+        onUpdate(node.id, p);
+      }
+    };
     const onMove = (moveEv: PointerEvent) => {
       // Snapshot history on the first real movement (not on a plain click-select).
       if (!started) {
@@ -245,10 +265,18 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
       const scale = (window as any)._canvasScale || 1;
       const dx = (moveEv.clientX - startX) / scale;
       const dy = (moveEv.clientY - startY) / scale;
-      onUpdate(node.id, { x: initialNodeX + dx, y: initialNodeY + dy });
+      pending = { x: initialNodeX + dx, y: initialNodeY + dy };
+      if (!raf) raf = requestAnimationFrame(flush);
     };
 
     const onUp = () => {
+      cancelAnimationFrame(raf);
+      raf = 0;
+      // 落点：提交最后一帧未刷新的位置，确保位置准确。
+      if (pending) {
+        onUpdate(node.id, pending);
+        pending = null;
+      }
       window.removeEventListener('pointermove', onMove as EventListener);
       window.removeEventListener('pointerup', onUp);
     };
@@ -264,7 +292,16 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
     const initialW = node.width || 300;
     const initialH = node.height || (node.type === 'image' ? 300 : 200);
     let started = false;
-
+    let raf = 0;
+    let pending: { width: number; height: number } | null = null;
+    const flush = () => {
+      raf = 0;
+      if (pending) {
+        const p = pending;
+        pending = null;
+        onUpdate(node.id, p);
+      }
+    };
     const onMove = (moveEv: PointerEvent) => {
       if (!started) {
         started = true;
@@ -273,13 +310,20 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
       const scale = (window as any)._canvasScale || 1;
       const dx = (moveEv.clientX - startX) / scale;
       const dy = (moveEv.clientY - startY) / scale;
-      onUpdate(node.id, { 
-        width: Math.max(200, initialW + dx), 
-        height: Math.max(100, initialH + dy) 
-      });
+      pending = {
+        width: Math.max(200, initialW + dx),
+        height: Math.max(100, initialH + dy),
+      };
+      if (!raf) raf = requestAnimationFrame(flush);
     };
 
     const onUp = () => {
+      cancelAnimationFrame(raf);
+      raf = 0;
+      if (pending) {
+        onUpdate(node.id, pending);
+        pending = null;
+      }
       window.removeEventListener('pointermove', onMove as EventListener);
       window.removeEventListener('pointerup', onUp);
     };
@@ -290,15 +334,9 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
 
   return (
     <motion.div
-      initial={{ scale: 0.9, opacity: 0 }}
-      animate={{ 
-        scale: 1, 
-        opacity: 1
-      }}
-      transition={{ 
-        scale: { type: "spring", stiffness: 300, damping: 25 },
-        opacity: { duration: 0.2 }
-      }}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ opacity: { duration: 0.18 } }}
       onHoverStart={() => setIsHovered(true)}
       onHoverEnd={() => setIsHovered(false)}
       onPointerDown={handleNodePointerDown}
@@ -543,12 +581,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
               }}
               onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
             >
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                components={markdownComponents}
-              >
-                {node.content || '*双击以输入 Markdown…*'}
-              </ReactMarkdown>
+              <MarkdownBody content={node.content || ''} />
             </div>
           )
         )}

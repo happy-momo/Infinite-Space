@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, LlmError } from "./server/llm";
 
 dotenv.config();
 
@@ -203,6 +203,30 @@ async function startServer() {
         res.write(`data: ${JSON.stringify({ error: msg, done: true })}\n\n`);
         res.end();
       }
+    }
+  });
+
+  // ---- AI Generate Board (turn a description into nodes + edges on canvas) ----
+  app.post("/api/llm/generate-board", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { description, count, context } = req.body || {};
+      if (typeof description !== "string" || !description.trim()) {
+        return res.status(400).json({ error: "缺少描述内容" });
+      }
+      const max = Math.min(60, Math.max(3, Number(count) || 30));
+      const ctx = (context && typeof context === "object") ? {
+        pageName: typeof context.pageName === "string" ? context.pageName : undefined,
+        titles: Array.isArray(context.titles) ? context.titles.filter((t: any) => typeof t === "string").slice(0, 15) : undefined,
+      } : undefined;
+      const board = await generateBoard(cfg, description, max, ctx);
+      res.json({ board });
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
     }
   });
 
