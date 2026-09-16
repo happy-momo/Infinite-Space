@@ -884,3 +884,130 @@ ${listText}
 
   return { relations };
 }
+
+// ---- AI 修改画布（针对现有看板做增量编辑，而不是整块重生成）----
+// 修正"要求修改现有看板却生成了全新内容"的问题：
+// 该调用产出对"现有节点/连线"的增量操作（update/add/delete/link/unlink），
+// 且只接受引用真实 id 的动作；无法落地的动作一律丢弃，绝不脑补新主题。
+
+export type ModifyNodeAction =
+  | { op: 'update'; id: string; content?: string; title?: string; x?: number; y?: number }
+  | { op: 'add'; type: 'text' | 'markdown'; title?: string; content: string }
+  | { op: 'delete'; id: string }
+  | { op: 'link'; source: string; target: string; label?: string }
+  | { op: 'unlink'; source: string; target: string };
+
+export interface ModifyBoardResult {
+  title?: string;
+  actions: ModifyNodeAction[];
+}
+
+export async function llmModifyBoard(
+  cfg: LlmConfig,
+  nodes: NodeInput[],
+  edges: EdgeInput[],
+  instruction: string,
+  history?: { role: string; content: string }[],
+): Promise<ModifyBoardResult> {
+  const nodeArr = Array.isArray(nodes) ? nodes : [];
+  const edgeArr = Array.isArray(edges) ? edges : [];
+  const byId = new Map(nodeArr.map((n) => [n.id, n]));
+  const list = nodeArr
+    .slice(0, 60)
+    .map((n) => `- id:${n.id} | type:${n.type} | ${serializeContent(n).replace(/\s+/g, ' ').slice(0, 120)}`)
+    .join('\n');
+  const edgeList = edgeArr
+    .slice(0, 120)
+    .map((e) => `- ${e.source} → ${e.target}${e.id ? ` (id:${e.id})` : ''}`)
+    .join('\n');
+
+  const hist = Array.isArray(history) && history.length
+    ? history.slice(-8).map((h) => `${h.role}: ${String(h.content || '').slice(0, 500)}`).join('\n')
+    : '';
+
+  const system =
+    '你是无限画布的编辑助手。用户会给出现有看板的节点/连线快照和修改要求。只返回 JSON，不要多余文字。';
+  const user = `
+现在看板的节点快照（id 是真实 id，必须原样引用，绝不允许编造或改动 id）：
+${list || '（无节点）'}
+
+现有连线：
+${edgeList || '（无连线）'}
+${hist ? `\n最近的对话如下，请结合上下文理解用户要求：\n${hist}` : ''}
+
+用户的修改要求：
+${String(instruction || '').slice(0, 4000)}
+
+请把上面的修改要求解构成一组对"现有看板"的增量操作。只支持以下 5 种 op：
+- update: 修改某个已有节点（id 必须引用上面的真实 id；content 用纯文本或 markdown，title 为可选短标题；若只是重新排版可给 x,y 新坐标）。
+- add: 新增一个节点（type 只能 "text" 或 "markdown"，content 必填，title 可选）。
+- delete: 删除某个已有节点（id 必须真实）。
+- link: 在两个已有节点之间加连线（source/target 必须真实且不相等，label 为简短关系）。
+- unlink: 移除两个已有节点之间的连线（source/target 必须真实）。
+
+铁律：
+- update/delete/link/unlink 只能引用上面列出的真实 id；id 不在列表中的动作会被丢弃。
+- 不要对没有实际修改需求的节点生成 update。
+- 若给不出可落地的具体动作（比如要求太含糊），返回空 actions，绝不要为了"交差"而编造内容或生成新主题。
+
+只返回如下 JSON（不要 markdown）：
+{"title":"（可选）一句修改说明","actions":[{"op":"update","id":"<真实id>","content":"...","title":"...","x":0,"y":0},{"op":"add","type":"text","content":"...","title":"..."},{"op":"delete","id":"<真实id>"},{"op":"link","source":"<真实id>","target":"<真实id>","label":"关系"},{"op":"unlink","source":"<真实id>","target":"<真实id>"}]}
+`;
+
+  let text = await callLlm(cfg, system, user);
+  let parsed: unknown;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    text = await callLlm(cfg, system, `${user}\n\n上次输出不是合法 JSON，请只输出规定的 JSON 格式，不要多余内容。`);
+    parsed = extractJson(text);
+  }
+
+  const raw = parsed as any;
+  const title = typeof raw?.title === 'string' ? String(raw.title).trim().slice(0, 40) : '';
+  const rawActions = Array.isArray(raw?.actions) ? raw.actions : [];
+  const actions: ModifyNodeAction[] = [];
+  const fin = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+
+  for (const a of rawActions) {
+    if (!a || typeof a !== 'object') continue;
+    const op = a.op;
+    if (op === 'update') {
+      const id = typeof a.id === 'string' ? a.id : '';
+      if (!byId.has(id)) continue;
+      const act: { op: 'update'; id: string; content?: string; title?: string; x?: number; y?: number } = { op: 'update', id };
+      if (typeof a.content === 'string' && a.content.trim()) act.content = sanitizeText(a.content).slice(0, 400);
+      if (typeof a.title === 'string' && a.title.trim()) act.title = a.title.trim().slice(0, 30);
+      if (fin(a.x)) act.x = Math.max(-100000, Math.min(100000, a.x));
+      if (fin(a.y)) act.y = Math.max(-100000, Math.min(100000, a.y));
+      if (act.content !== undefined || act.title !== undefined || act.x !== undefined || act.y !== undefined) {
+        actions.push(act);
+      }
+    } else if (op === 'add') {
+      const content = typeof a.content === 'string' ? sanitizeText(a.content).slice(0, 400) : '';
+      if (!content) continue;
+      const type = a.type === 'markdown' ? 'markdown' : 'text';
+      const act: { op: 'add'; type: 'text' | 'markdown'; content: string; title?: string } = { op: 'add', type, content };
+      if (typeof a.title === 'string' && a.title.trim()) act.title = a.title.trim().slice(0, 30);
+      actions.push(act);
+    } else if (op === 'delete') {
+      const id = typeof a.id === 'string' ? a.id : '';
+      if (byId.has(id)) actions.push({ op: 'delete', id });
+    } else if (op === 'link') {
+      const s = typeof a.source === 'string' ? a.source : '';
+      const t = typeof a.target === 'string' ? a.target : '';
+      if (s !== t && byId.has(s) && byId.has(t)) {
+        const act: { op: 'link'; source: string; target: string; label?: string } = { op: 'link', source: s, target: t };
+        if (typeof a.label === 'string' && a.label.trim()) act.label = a.label.trim().slice(0, 10);
+        actions.push(act);
+      }
+    } else if (op === 'unlink') {
+      const s = typeof a.source === 'string' ? a.source : '';
+      const t = typeof a.target === 'string' ? a.target : '';
+      if (s !== t && byId.has(s) && byId.has(t)) actions.push({ op: 'unlink', source: s, target: t });
+    }
+    if (actions.length >= 100) break;
+  }
+
+  return { title, actions };
+}

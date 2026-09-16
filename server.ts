@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, llmModifyBoard, LlmError } from "./server/llm";
 
 dotenv.config();
 
@@ -224,6 +224,34 @@ async function startServer() {
       } : undefined;
       const board = await generateBoard(cfg, description, max, ctx);
       res.json({ board });
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  // ---- AI Modify Board (incremental edits to the EXISTING board, not fresh generation) ----
+  app.post("/api/llm/modify-board", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { instruction, nodes, edges, history } = req.body || {};
+      if (typeof instruction !== "string" || !instruction.trim()) {
+        return res.status(400).json({ error: "缺少修改要求" });
+      }
+      if (!Array.isArray(nodes)) {
+        return res.status(400).json({ error: "Invalid nodes data" });
+      }
+      const result = await llmModifyBoard(
+        cfg,
+        nodes,
+        Array.isArray(edges) ? edges : [],
+        instruction,
+        Array.isArray(history) ? history : undefined,
+      );
+      res.json(result);
     } catch (error) {
       const msg = error instanceof LlmError ? error.message : (error as Error).message;
       res.status(502).json({ error: msg });
