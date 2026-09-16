@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, llmModifyBoard, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, llmModifyBoard, LlmError, Cell } from "./server/llm";
 
 dotenv.config();
 
@@ -307,12 +307,21 @@ async function startServer() {
       if (!Array.isArray(rows) || rows.length < 2) {
         return res.status(400).json({ error: "表格数据至少需要两行（表头 + 数据）" });
       }
-      // 只接受字符串二维数组，防止恶意 payload
-      const clean: string[][] = rows
+      // 接受字符串或 {text, isHeader} 单元对象二维数组，保留表头语义；防恶意 payload
+      const clean: Cell[][] = rows
         .slice(0, 100)
         .map((r) =>
           Array.isArray(r)
-            ? r.slice(0, 30).map((c) => String(c ?? "").slice(0, 200))
+            ? r.slice(0, 30).map((c) => {
+                if (c && typeof c === "object") {
+                  const cc = c as Record<string, unknown>;
+                  return {
+                    text: String(cc?.text ?? "").slice(0, 200),
+                    isHeader: cc?.isHeader === true,
+                  };
+                }
+                return { text: String(c ?? "").slice(0, 200) };
+              })
             : []
         )
         .filter((r) => r.length > 0);

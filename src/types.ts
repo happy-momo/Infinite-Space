@@ -58,6 +58,10 @@ export interface ChartConfig {
   yAxis?: string;
   /** 系列字段（多系列时） */
   series?: string[];
+  /** 主数值列单位（% / 万元 / 元 / 件…），供轴与数值标注 */
+  unit?: string;
+  /** AI 数据洞察一句结论（基于真实数据） */
+  insight?: string;
   /** 自定义配色（可选，缺省用内置色板） */
   colors?: string[];
   /** 图表数据快照（来源表格的清洗后数据） */

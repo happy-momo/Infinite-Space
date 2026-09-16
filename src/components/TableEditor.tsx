@@ -9,8 +9,8 @@ interface Props {
   node: NodeData;
   onUpdate: (id: string, updates: Partial<NodeData>) => void;
   onTransactionStart: () => void;
-  /** 请求 AI 生成图表（由父级触发，这里只提供入口） */
-  onGenerateChart: () => void;
+  /** 请求 AI 生成图表（instruction 为可选的分析意图，由父级触发） */
+  onGenerateChart: (instruction?: string) => void;
   generating?: boolean;
 }
 
@@ -23,6 +23,7 @@ export function TableEditor({ node, onUpdate, onTransactionStart, onGenerateChar
   const data = node.tableData && node.tableData.length > 0 ? node.tableData : emptyGrid();
   const fileRef = useRef<HTMLInputElement>(null);
   const [fileErr, setFileErr] = useState<string | null>(null);
+  const [intent, setIntent] = useState('');
 
   const commit = (next: TableCell[][]) => onUpdate(node.id, { tableData: next });
 
@@ -77,8 +78,20 @@ export function TableEditor({ node, onUpdate, onTransactionStart, onGenerateChar
         </button>
         <div className="flex-1" />
         {fileErr && <span className="text-[10px] text-red-500">{fileErr}</span>}
+        <input
+          value={intent}
+          onChange={(e) => setIntent(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (e.key === 'Enter' && !generating && data.length >= 2) onGenerateChart(intent.trim() || undefined);
+          }}
+          placeholder="分析意图…（可选）"
+          maxLength={60}
+          title="描述想分析什么（如：比较各地区、看增长趋势），回车生成"
+          className="w-32 shrink-0 px-2 py-1 rounded-lg bg-white/70 border border-black/5 text-[11px] text-gray-500 outline-none focus:border-fuchsia-400 placeholder:text-gray-300 dark:bg-white/5 dark:border-white/10 dark:text-gray-200 dark:placeholder:text-gray-600"
+        />
         <button
-          onClick={onGenerateChart}
+          onClick={() => onGenerateChart(intent.trim() || undefined)}
           disabled={generating || data.length < 2}
           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-gradient-to-r from-fuchsia-500 to-purple-500 text-white text-[11px] font-medium transition-opacity hover:opacity-90 disabled:opacity-40"
           title="用 AI 分析数据并生成图表"

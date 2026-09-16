@@ -1134,6 +1134,12 @@ export default function App() {
     setSuggestLoading(false);
   }, [currentPageId]);
 
+  // maxZ 与当前画布最高 zIndex 调和：任何 nodes 被替换（导入/模板/切页/持久化/服务端）后，
+  // 把 maxZ 抬到最高，避免「置顶/新建节点落到旧的高 z 节点之下」；其余时刻为 no-op。
+  useEffect(() => {
+    setMaxZ((cur) => Math.max(cur, ...nodes.map((n) => n.zIndex || 1)));
+  }, [nodes]);
+
   // 关闭面板 → 清空全部联想缓存（下次打开重新分析）
   const closeSuggest = () => {
     setIsSuggestOpen(false);
@@ -1154,12 +1160,44 @@ export default function App() {
     setSuggestEpoch((e) => e + 1);
   };
 
-  // 工具栏开关：打开时捕获当前单选节点为联想源；关闭走 closeSuggest（与 ✕ 行为一致，清空缓存）
-  const toggleSuggest = () => {
+  // 右抽屉互斥：打开一个时关掉其余两个（三个抽屉共用同一固定槽位，避免互相遮挡）。
+  // except 之外的都关闭；'suggest' 分支顺带清空其缓存，与 closeSuggest 一致。
+  const closeOtherDrawers = (except: 'chat' | 'suggest' | 'tag') => {
+    if (except !== 'chat') setIsChatOpen(false);
+    if (except !== 'suggest') {
+      setIsSuggestOpen(false);
+      setSuggestForNodeId(null);
+      setSuggestByNode({});
+      setSuggestLoading(false);
+    }
+    if (except !== 'tag') setIsTagPanelOpen(false);
+  };
+
+  const handleToggleChat = () => {
+    if (isChatOpen) {
+      setIsChatOpen(false);
+      return;
+    }
+    closeOtherDrawers('chat');
+    setIsChatOpen(true);
+  };
+
+  const handleToggleTagPanel = () => {
+    if (isTagPanelOpen) {
+      setIsTagPanelOpen(false);
+      return;
+    }
+    closeOtherDrawers('tag');
+    setIsTagPanelOpen(true);
+  };
+
+  // 工具栏联想想按钮：打开时捕获当前单选节点为联想源；关闭走 closeSuggest（与 ✕ 行为一致，清空缓存）
+  const handleToggleSuggest = () => {
     if (isSuggestOpen) {
       closeSuggest();
       return;
     }
+    closeOtherDrawers('suggest');
     setIsSuggestOpen(true);
     setSuggestForNodeId(selectedIds.size === 1 ? Array.from(selectedIds)[0] : null);
   };
@@ -1680,7 +1718,7 @@ export default function App() {
   };
 
   // ---- AI 生成图表：读取表格数据 → /api/llm/chart → 在表格右侧创建 chart 节点 ----
-  const handleGenerateChart = useCallback(async (tableNodeId: string) => {
+  const handleGenerateChart = useCallback(async (tableNodeId: string, instruction?: string) => {
     const table = nodesRef.current.find((n) => n.id === tableNodeId);
     if (!table || !table.tableData || table.tableData.length < 2) {
       alert('表格至少需要表头 + 一行数据才能生成图表');
@@ -1688,12 +1726,12 @@ export default function App() {
     }
     setGeneratingChartId(tableNodeId);
     try {
-      // TableCell[][] → string[][]
-      const rows = table.tableData.map((row) => row.map((c) => c.text));
+      // TableCell[][] → Cell[][]：保留表头语义，供 AI 理解
+      const rows = table.tableData.map((row) => row.map((c) => ({ text: c.text, isHeader: c.isHeader })));
       const response = await fetch('/api/llm/chart', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rows }),
+        body: JSON.stringify({ rows, instruction }),
       });
       const data = await response.json();
       if (response.ok && Array.isArray(data.data) && data.data.length > 0) {
@@ -1715,6 +1753,9 @@ export default function App() {
             title: data.title,
             xAxis: data.xAxis,
             yAxis: data.yAxis,
+            unit: data.unit,
+            insight: data.insight,
+            series: Array.isArray(data.series) ? data.series.map((s: any) => s.name).filter(Boolean) : undefined,
             data: data.data,
           },
         };
@@ -1902,18 +1943,6 @@ export default function App() {
           dragEdge={dragEdge}
         />
 
-        {marquee && (
-          <div
-            className="absolute border-2 border-blue-500 bg-blue-500/10 pointer-events-none z-10"
-            style={{
-              left: marquee.x0,
-              top: marquee.y0,
-              width: marquee.x1 - marquee.x0,
-              height: marquee.y1 - marquee.y0,
-            }}
-          />
-        )}
-
         <div className="absolute inset-0 pointer-events-none *:pointer-events-auto">
           {visibleNodes.map(node => {
             return (
@@ -1936,6 +1965,20 @@ export default function App() {
           })}
         </div>
       </motion.div>
+
+      {/* 选框抬出 motion.div 的 stacking context：用 fixed 覆盖层 + world→screen 换算，
+          使其天然高于任意节点 z。命中检测仍在 onMove 的世界坐标里完成。 */}
+      {marquee && (
+        <div
+          className="fixed border-2 border-blue-500 bg-blue-500/10 pointer-events-none z-[55]"
+          style={{
+            left: marquee.x0 * scale.get() + x.get(),
+            top: marquee.y0 * scale.get() + y.get(),
+            width: (marquee.x1 - marquee.x0) * scale.get(),
+            height: (marquee.y1 - marquee.y0) * scale.get(),
+          }}
+        />
+      )}
 
       <Minimap nodes={nodes} x={x} y={y} scale={scale} />
       <ViewportControls
@@ -2020,12 +2063,12 @@ export default function App() {
         onAdd={handleAddNode}
         isLinking={isLinking}
         onToggleLink={toggleLinking}
-        onToggleChat={() => setIsChatOpen((o) => !o)}
+        onToggleChat={handleToggleChat}
         isChatOpen={isChatOpen}
         onToggleSearch={() => setIsSearchOpen((o) => !o)}
-        onToggleTagPanel={() => setIsTagPanelOpen((o) => !o)}
+        onToggleTagPanel={handleToggleTagPanel}
         isTagPanelOpen={isTagPanelOpen}
-        onToggleSuggest={toggleSuggest}
+        onToggleSuggest={handleToggleSuggest}
         isSuggestOpen={isSuggestOpen}
         hasSingleSelection={selectedIds.size === 1}
         onAiOrganize={handleAiOrganize}
@@ -2048,7 +2091,7 @@ export default function App() {
 
       {linkSource && (
         <div className="fixed top-8 left-1/2 -translate-x-1/2 bg-blue-500 text-white px-4 py-2 rounded-full shadow-lg pointer-events-none z-50">
-          Select target node to connect...
+          选择目标节点以连线…
         </div>
       )}
 

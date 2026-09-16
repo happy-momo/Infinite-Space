@@ -74,22 +74,22 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOp
       transition={{ type: "spring", stiffness: 200, damping: 20, delay: 0.2 }}
       className="fixed bottom-4 left-1/2 -translate-x-1/2 md:bottom-8 flex items-center gap-1 p-1.5 w-max max-w-[clamp(15rem,calc(100vw - 36rem),78vw)] overflow-x-auto custom-scrollbar bg-white/80 backdrop-blur-2xl border border-white/60 shadow-[0_8px_32px_rgba(0,0,0,0.08)] rounded-2xl z-50 dark:bg-gray-900/80 dark:border-white/10"
     >
-      <ToolButton icon={<Type size={18} />} label="Text" onClick={() => onAdd('text')} />
-      <ToolButton icon={<ImageIcon size={18} />} label="Image" onClick={() => onAdd('image')} />
-      <ToolButton icon={<Link size={18} />} label="Link" onClick={() => onAdd('link')} />
+      <ToolButton icon={<Type size={18} />} label="文字" onClick={() => onAdd('text')} />
+      <ToolButton icon={<ImageIcon size={18} />} label="图片" onClick={() => onAdd('image')} />
+      <ToolButton icon={<Link size={18} />} label="链接" onClick={() => onAdd('link')} />
       <ToolButton icon={<FileCode2 size={18} />} label="Markdown" onClick={() => onAdd('markdown')} />
-      <ToolButton icon={<Table2 size={18} />} label="Table" onClick={() => onAdd('table')} />
+      <ToolButton icon={<Table2 size={18} />} label="表格" onClick={() => onAdd('table')} />
 
       <div className="w-px h-5 bg-gray-200 mx-1 dark:bg-white/10" />
 
-      <ToolButton icon={<Undo2 size={18} />} label="Undo (Ctrl+Z)" onClick={onUndo} disabled={!canUndo} />
-      <ToolButton icon={<Redo2 size={18} />} label="Redo (Ctrl+Shift+Z)" onClick={onRedo} disabled={!canRedo} />
+      <ToolButton icon={<Undo2 size={18} />} label="撤销 (Ctrl+Z)" onClick={onUndo} disabled={!canUndo} />
+      <ToolButton icon={<Redo2 size={18} />} label="重做 (Ctrl+Shift+Z)" onClick={onRedo} disabled={!canRedo} />
 
       <div className="w-px h-5 bg-gray-200 mx-1 dark:bg-white/10" />
 
       <ToolButton
         icon={<Link2 size={18} />}
-        label="Connect Nodes"
+        label="连接节点"
         onClick={onToggleLink}
         active={isLinking}
         activeColor="text-blue-500 bg-blue-50"
@@ -105,7 +105,7 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOp
 
       <ToolButton
         icon={<Trash2 size={18} />}
-        label={hasSelection ? "Delete Selected" : "Clear All"}
+        label={hasSelection ? "删除选中" : "清空全部"}
         onClick={onClear}
         hoverColor="hover:text-red-500 hover:bg-red-50"
         active={hasSelection}
@@ -115,20 +115,20 @@ export function Toolbar({ onAdd, isLinking, onToggleLink, onToggleChat, isChatOp
       <div className="w-px h-5 bg-gray-200 mx-1 dark:bg-white/10" />
 
       {/* AI 工具簇：统一胶囊样式，全部集中在此 */}
-      <AiPill tint="from-blue-700 to-blue-800" icon={<MessageSquare size={14} />} label="AI Chat" onClick={onToggleChat} active={isChatOpen} />
+      <AiPill tint="from-blue-700 to-blue-800" icon={<MessageSquare size={14} />} label="AI 对话" onClick={onToggleChat} active={isChatOpen} />
       <AiPill tint="from-fuchsia-700 to-fuchsia-800" icon={<Lightbulb size={14} />} label="AI 联想" onClick={onToggleSuggest} active={isSuggestOpen} disabled={!hasSingleSelection} />
       <AiPill tint="from-teal-700 to-teal-800" icon={<ArrowRightLeft size={14} />} label="AI 标注关系" onClick={onLabelEdges} loading={isLabeling} disabled={!canLabel || isLabeling} />
-      <AiPill tint="from-indigo-700 to-violet-800" icon={<Sparkles size={14} />} label={isOrganizing ? "整理中…" : "AI Organize"} onClick={onAiOrganize} loading={isOrganizing} disabled={isOrganizing} />
-      <AiPill tint="from-emerald-700 to-emerald-800" icon={<BookOpenText size={14} />} label={isSummarizing ? "生成中…" : "AI Story"} onClick={onAiSummarize} loading={isSummarizing} disabled={isSummarizing} />
+      <AiPill tint="from-indigo-700 to-violet-800" icon={<Sparkles size={14} />} label={isOrganizing ? "整理中…" : "AI 整理"} onClick={onAiOrganize} loading={isOrganizing} disabled={isOrganizing} />
+      <AiPill tint="from-emerald-700 to-emerald-800" icon={<BookOpenText size={14} />} label={isSummarizing ? "生成中…" : "AI 故事"} onClick={onAiSummarize} loading={isSummarizing} disabled={isSummarizing} />
 
       <div className="w-px h-5 bg-gray-200 mx-1 dark:bg-white/10" />
 
       {/* 导出/导入 + 设置 放在一起 */}
-      <ToolButton icon={<Download size={18} />} label="Export JSON" onClick={onExport} />
-      <ToolButton icon={<Upload size={18} />} label="Import JSON" onClick={onImport} />
+      <ToolButton icon={<Download size={18} />} label="导出 JSON" onClick={onExport} />
+      <ToolButton icon={<Upload size={18} />} label="导入 JSON" onClick={onImport} />
       <ToolButton
         icon={<Settings size={18} />}
-        label="LLM Settings"
+        label="LLM 设置"
         onClick={onOpenSettings}
       />
     </motion.div>

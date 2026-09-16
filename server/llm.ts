@@ -574,42 +574,93 @@ export async function streamLlm(
   }
 }
 
+/** 表格单元格（语义富化：isHeader 标记是否表头） */
+export interface Cell {
+  text: string;
+  isHeader?: boolean;
+}
+
+/** 多系列（图表）定义：名称 + 单位 */
+export interface ChartSeries {
+  name: string;
+  unit?: string;
+}
+
 export interface ChartResult {
   chartType: 'bar' | 'line' | 'pie';
   title: string;
   xAxis: string;
   yAxis: string;
-  data: { label: string; value: number }[];
-  reason: string;
+  data: { label: string; value: number; series?: string }[];
+  /** 主数值列单位（% / 万元 / 元 / 件…），供轴与数值标注 */
+  unit?: string;
+  /** 多序列定义（含各系列单位） */
+  series?: ChartSeries[];
+  /** 一句话数据洞察（基于真实数据的最关键结论） */
+  insight?: string;
+  reason?: string;
+  /** 数据被截断时为 true，提示用户非全量 */
+  truncated?: boolean;
+}
+
+// 注意：不要用 \b（JS 的 \b 只认 ASCII \w，纯中文“合计”结尾不构成边界，会漏判）
+const TOTAL_RE = /^(合计|总计|小计|汇总|总计合计|Total|Subtotal|Grand\s*Total|Sum)/i;
+
+// 判断某行是否为合计/汇总行（首格命中关键字）
+function isTotalRow(row: Cell[]): boolean {
+  const first = String(row[0]?.text ?? '').trim();
+  return TOTAL_RE.test(first);
+}
+
+function cellText(c: Cell | undefined): string {
+  return String(c?.text ?? '').trim();
 }
 
 // AI 分析表格数据，决定图表类型并清洗出数值数据。
-// 只允许返回 bar/line/pie 三种类型；数值由模型从表格中提取。
+// 支持多系列(series)、单位(unit)、数据洞察(insight)；保留表头/合计语义。
+// 只允许返回 bar/line/pie；数值由模型从表格中提取。
 export async function analyzeChart(
   cfg: LlmConfig,
-  rows: string[][],
+  rows: Cell[][],
   instruction?: string,
 ): Promise<ChartResult> {
   if (!rows.length) throw new LlmError('表格为空，无法生成图表');
-  const tableText = rows.slice(0, 50).map((r) => r.join(' | ')).join('\n');
+
+  // 第一个 isHeader 行视为表头（退化到行 0）；合计/汇总行仅作参考说明、不纳入 data。
+  const headerRow = rows.find((r) => r.some((c) => c?.isHeader)) || rows[0];
+  const dataRows = rows.filter((r) => r !== headerRow && !isTotalRow(r));
+  const truncated = dataRows.length > 48;
+  const shown = dataRows.slice(0, 48);
+
+  const parts: string[] = [];
+  if (headerRow) parts.push(`[表头] ${headerRow.slice(0, 30).map(cellText).join(' | ')}`);
+  shown.forEach((r, i) => parts.push(`[${i + 1}] ${r.slice(0, 30).map(cellText).join(' | ')}`));
+  if (truncated) parts.push(`...(数据行超 48，仅展示前 48 行，共 ${dataRows.length} 行)`);
+  const tableText = parts.join('\n');
+
+  const totalNote = rows.some(isTotalRow)
+    ? '注：表格含「合计/汇总」行，仅作参考、不要计入 data。'
+    : '';
 
   const system =
-    '你是一个数据可视化助手。只返回 JSON，不要多余文字，不要 markdown。';
+    '你是数据可视化与分析助手。只返回 JSON，不要多余文字，不要 markdown。';
   const user = `
-下面是用户表格数据（第一行通常是表头）：
+给定表格数据（表头已标注为 [表头]，其余为数据行；[n] 是行序号）：
 ${tableText}
+${totalNote}
 ${instruction ? `\n用户的额外要求：${instruction}` : ''}
 
-请分析这些数据，并决定用哪种图表展示最合适（bar=柱状图 / line=折线图 / pie=饼图）。
-要求：
-1. chartType 只能取 "bar"、"line"、"pie" 三者之一。
-2. title 用简短中文标题（不超过 20 字）。
-3. 选择一个合适的"类别"列作为 label（如名称、月份、类型），选择一个"数值"列作为 value（必须是数字；若是百分比、货币、千分位等，请先转换为纯数字，例如 85.5% → 85.5，¥1,200 → 1200）。
-4. data 数组：每个条目 {label, value}，label 取类别值，value 取对应数值。不要遗漏数据行。
-5. reason 用一句话说明为什么选这种图表（不超过 40 字）。
+请先判断这组数据适合被用来回答什么问题（对比／趋势／构成占比／分布／排名），再结合用户的额外要求（若有）决定图表：
+- 图类型：bar 柱状=类别对比；line 折线=随时间或有序类别看趋势；pie 饼图=部分占整体的构成（仅当各值可视为整体的一部分、且整体≈100% 的语义时）。
+- 类别数超过 7 时，柱状图可只取前 N 项或合并“其他”。
+- 存在重复类别或明细行过多时，先按类别聚合（累计用求和，比率用均值）。
+- 若有多列数值，请选 1 个类别列 + 1~N 个数值列生成多系列；多系列时 yAxis 写主数值列名，并在 series 中给出每个系列的 name 与 unit。
+- 数值规范化：货币/百分比/千分位转纯数字但保留单位。单系列时把该列单位写入 unit；多系列时 unit 置空字符串 ""，把各系列单位分别写入 series[].unit。
+- 只用给定数据，严禁编造或补齐缺失值；无法确定的值跳过该行，不得假设。
+- title 简洁中文（≤20字）；insight 用一句话（≤40字）概括最关键结论（最高/最低/趋势/异常/占比最大），必须基于真实数据。
 
 只返回 JSON，格式：
-{"chartType":"bar","title":"标题","xAxis":"列名","yAxis":"列名","data":[{"label":"...","value":123}],"reason":"..."}
+{"chartType":"bar","title":"标题","xAxis":"类别列","yAxis":"数值列","unit":"单位","series":[{"name":"系列名","unit":"单位"}],"data":[{"label":"类别值","value":123,"series":"系列名"}],"insight":"一句话洞察","reason":"选型理由","truncated":false}
 `;
 
   const text = await callLlm(cfg, system, user);
@@ -619,21 +670,38 @@ ${instruction ? `\n用户的额外要求：${instruction}` : ''}
   const ct = parsed.chartType;
   if (ct !== 'bar' && ct !== 'line' && ct !== 'pie') throw new LlmError(`不支持的图表类型: ${ct}`);
 
-  const data: { label: string; value: number }[] = Array.isArray(parsed.data)
+  const data: { label: string; value: number; series?: string }[] = Array.isArray(parsed.data)
     ? parsed.data
-        .filter((d: any) => d && typeof d.label === 'string' && typeof d.value === 'number' && isFinite(d.value))
-        .map((d: any) => ({ label: d.label, value: d.value }))
+        .filter((d: any) => d && typeof d.label === 'string' && typeof d.value === 'number' && isFinite(d.value) && !TOTAL_RE.test(String(d.label)))
+        .map((d: any) => ({
+          label: d.label,
+          value: d.value,
+          ...(typeof d.series === 'string' && d.series ? { series: d.series } : {}),
+        }))
     : [];
 
   if (data.length === 0) throw new LlmError('未能从表格中提取到有效的数值数据');
 
+  const series = Array.isArray(parsed.series)
+    ? parsed.series
+        .filter((s: any) => s && typeof s.name === 'string' && s.name)
+        .map((s: any) => ({ name: s.name, unit: typeof s.unit === 'string' ? s.unit : undefined }))
+    : undefined;
+
+  // 多系列时单位属于各系列（series[].unit），主 unit 留空避免轴标注歧义
+  const effectiveUnit = series && series.length > 1 ? undefined : parsed.unit;
+
   return {
     chartType: ct,
-    title: typeof parsed.title === 'string' ? parsed.title : '数据图表',
+    title: typeof parsed.title === 'string' && parsed.title ? parsed.title : '数据图表',
     xAxis: typeof parsed.xAxis === 'string' ? parsed.xAxis : '',
     yAxis: typeof parsed.yAxis === 'string' ? parsed.yAxis : '',
     data,
+    unit: typeof effectiveUnit === 'string' && effectiveUnit ? effectiveUnit : undefined,
+    series,
+    insight: typeof parsed.insight === 'string' && parsed.insight ? parsed.insight : undefined,
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    truncated,
   };
 }
 

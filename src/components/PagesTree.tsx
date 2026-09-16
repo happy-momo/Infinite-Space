@@ -84,7 +84,7 @@ export function PagesTree(
         />
         <span className="truncate flex-1">{p.name}</span>
         {p.id !== currentPageId && (
-          <button onClick={(e) => onDelete(e, p.id)} className={iconBtnCls} title="Delete canvas">
+          <button onClick={(e) => onDelete(e, p.id)} className={iconBtnCls} title="删除画布">
             <Trash2 size={13} />
           </button>
         )}
@@ -126,10 +126,10 @@ export function PagesTree(
             </span>
             <span className="truncate flex-1">{folder.name}</span>
             <span onClick={(e) => e.stopPropagation()} className="flex items-center shrink-0">
-              <button onClick={() => onAddPage(folder.id)} className={`${iconBtnCls} hover:text-blue-500 hover:bg-blue-50`} title="New canvas inside">
+              <button onClick={() => onAddPage(folder.id)} className={`${iconBtnCls} hover:text-blue-500 hover:bg-blue-50`} title="在文件夹内新建画布">
                 <Plus size={13} />
               </button>
-              <button onClick={(e) => onDelete(e, folder.id)} className={iconBtnCls} title="Delete folder">
+              <button onClick={(e) => onDelete(e, folder.id)} className={iconBtnCls} title="删除文件夹">
                 <Trash2 size={13} />
               </button>
             </span>
@@ -168,7 +168,7 @@ export function PagesTree(
         <button
           onClick={onToggle}
           className="w-full flex items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-black/[0.03] dark:hover:bg-white/[0.04]"
-          title={isOpen ? 'Collapse panel' : 'Expand panel'}
+          title={isOpen ? '收起面板' : '展开面板'}
         >
           <span className="shrink-0 w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 to-violet-500 text-white flex items-center justify-center shadow-sm">
             <FolderTree size={16} />
@@ -225,7 +225,7 @@ export function PagesTree(
                 <button
                   onClick={() => onAddFolder()}
                   className="shrink-0 w-9 h-9 flex items-center justify-center rounded-xl bg-white/70 text-amber-600 border border-black/5 shadow-sm hover:bg-amber-50 hover:text-amber-700 active:scale-[0.98] transition-all dark:bg-white/5 dark:border-white/10 dark:text-amber-400 dark:hover:bg-amber-500/20"
-                  title="New folder"
+                  title="新建文件夹"
                 >
                   <FolderPlus size={15} />
                 </button>

@@ -82,7 +82,7 @@ export function CanvasListItem({ page, isActive, canDelete, onSwitch, onRename, 
           <button
             onClick={startRename}
             className={`${iconClasses} hover:text-blue-500 hover:bg-blue-50`}
-            title="Rename Canvas"
+            title="重命名画布"
           >
             <Pencil size={14} />
           </button>
@@ -90,7 +90,7 @@ export function CanvasListItem({ page, isActive, canDelete, onSwitch, onRename, 
             <button
               onClick={(e) => onDelete(e, page.id)}
               className={`${iconClasses} hover:text-red-500 hover:bg-red-50`}
-              title="Delete Canvas"
+              title="删除画布"
             >
               <Trash2 size={14} />
             </button>
