@@ -27,6 +27,8 @@ interface Props {
   onInsertNode: (type: NodeType, content: string) => void;
   /** 把一大段文字描述自动生成为画布上的节点 + 连线；返回回执文本，失败抛错 */
   onGenerateBoard: (description: string) => Promise<string>;
+  /** 针对「现有看板」做增量修改（update/add/delete/link/unlink）；返回回执文本，失败抛错 */
+  onModifyBoard: (instruction: string, history?: ChatMessage[]) => Promise<string>;
 }
 
 // Markdown 富文本渲染：复用全局 prose 排版（与 Markdown 节点一致），外链新窗口打开。
@@ -52,19 +54,35 @@ const toPlainText = (content: string): string =>
     .replace(/\s+/g, ' ')
     .trim();
 
-// 创作画布意图识别：用户明确想"创建/生成/设计一个画布/看板/思维导图类视觉载体"时，
-// 无需大段内容即可触发自动生成（匹配不到时仍走普通对话或底部显式按钮）。
-const CREATE_RE = /(创作|生成|制作|设计|绘制|搭建|构建|规划|布置|新开|创建|打造|构思|做一|画|建|做|搭)/;
-const BOARD_RE = /(画布|看板|白板|思维导图|脑图|心智图|灵感板|展示板|展示墙|一张图|做.*(画布|看板|白板|思维导图))/;
+// 画布指代词：任何在说"看板/画布/节点/连线/现有内容"的话，都算在动手对象上。
+const BOARD_RE = /(画布|看板|白板|思维导图|脑图|心智图|灵感板|展示板|展示墙|一张图)/;
+// 一上来就问"是什么/怎么用"之类的，一律不算创建或修改意图，走普通对话。
+const QUESTION_RE = /\b(是什么|怎么用|如何|怎样|能不能(cancel|停止)|什么意思)\b/;
+
+// —— 修改现有看板意图 ——
+// 出现"改/调/删/合/重排/重新X/新增一个…"等动手动词，且指向画布或现有内容时，
+// 判定为"修改"而非"新建"。这是修复"要求改看板却被生成全新内容"的关键路由。
+const isModifyBoardIntent = (text: string): boolean => {
+  const t = text.trim();
+  if (!t || QUESTION_RE.test(t)) return false;
+  const modifyVerb =
+    /(修改|调整|重排|重做|重构|删|去掉|移除|合并|拆分|精简|美化|补充|深化|细化|丰富|扩写|改|连接|断开|新增一个|添加一个|加一个|增加一个|新建一个(节点|分组|块))|((重新|再次)(生成|设计|规划|搭建|制作|构造|布局|排版))/;
+  const ref = /(看板|画布|白板|思维导图|节点|连线|布局|结构|这个|当前|现有)/;
+  return modifyVerb.test(t) && ref.test(t);
+};
+
+// —— 全新创作画布意图 ——
+// 明确"创建/制作…一个（主题的）画布/看板"，且没有被判为修改意图时才触发自动生成。
+// 若一条句子里同时可改成"改"，修改优先（非破坏性、不覆盖现有内容）。
+const CREATE_RE = /(创作|生成|制作|设计|绘制|搭建|构建|规划|布置|新开|创建|打造|构思|做一|新做一个|画|建|做|搭)/;
 const isCreateBoardIntent = (text: string): boolean => {
   const t = text.trim();
-  if (!t) return false;
-  // 明显在问看板是什么/怎么用，不算创作意图
-  if (/\b(是什么|怎么用|如何|怎样|能不能(cancel|停止)|什么意思)\b/.test(t)) return false;
+  if (!t || QUESTION_RE.test(t)) return false;
+  if (isModifyBoardIntent(t)) return false; // 修改意图优先级高于新建
   return CREATE_RE.test(t) && BOARD_RE.test(t);
 };
 
-// 把看板节点/连线序列化为上下文附加到 system 指令（浏览器版，镜像服务端 buildCanvasContext）。
+// 把看板节点/连线序列化为上下文附加到 system 指令（浏览器版）。
 const buildCanvasContext = (pageName: string, nodes: NodeData[], edges: EdgeData[]): string => {
   const sys =
     '你是一个嵌入无限画布应用的 AI 助手。用简洁、友好的中文回答用户关于画布与节点内容的提问，也可帮用户梳理、扩展、总结思路。';
@@ -103,7 +121,7 @@ const buildCanvasContext = (pageName: string, nodes: NodeData[], edges: EdgeData
   return `${sys}\n\n当前看板「${pageName || '未命名'}」的内容：\n${nodesText}\n\n节点之间的连接：\n${edgeText || '（无）'}\n说明：你可以参考上面的看板内容回答问题，但不要编造看板中不存在的内容。`;
 };
 
-export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, messages, onChangeMessages, onClear, onInsertNode, onGenerateBoard }: Props) {
+export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, messages, onChangeMessages, onClear, onInsertNode, onGenerateBoard, onModifyBoard }: Props) {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -141,7 +159,12 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, mess
     setInput('');
     setStreamText('');
 
-    // 创作画布意图：用户说"帮我创作一个画布/看板/思维导图"等语义即可直接触发生成。
+    // 修改现有看板意图：如"帮我改一下这个看板""重新生成这个画布的布局" —— 做增量修改，不整块重生成。
+    if (isModifyBoardIntent(text)) {
+      await runModifyBoard(text);
+      return;
+    }
+    // 全新创作画布意图：用户说"帮我创作一个画布/看板/思维导图"等语义即可直接触发生成。
     if (isCreateBoardIntent(text)) {
       await runGenerateBoard(text);
       return;
@@ -214,6 +237,24 @@ export function AiChatPanel({ open, onClose, nodes, edges, currentPageName, mess
     }
   };
 
+  // 把修改要求提交给「修改画布」：对现有节点/连线做增量编辑，并把回执写进对话。
+  // 传入 messages 作为会话历史，让模型结合前文理解这条修改要求的上下文。
+  const runModifyBoard = async (desc: string) => {
+    if (streaming || generating) return;
+    const userMsg: ChatMessage = { role: 'user', content: desc };
+    const base = [...messages, userMsg];
+    onChangeMessages(base);
+    setGenerating(true);
+    setStreamText('');
+    try {
+      const receipt = await onModifyBoard(desc, messages);
+      onChangeMessages([...base, { role: 'assistant', content: `✅ ${receipt}\n\n修改已应用到当前看板，可用 Ctrl+Z 撤销。` }]);
+    } catch (e: any) {
+      onChangeMessages([...base, { role: 'assistant', content: `⚠️ ${e?.message || '修改失败，请检查服务与 LLM 配置'}` }]);
+    } finally {
+      setGenerating(false);
+    }
+  };
   const handleClear = () => {
     if (confirm('清空当前看板的对话？')) {
       abortRef.current?.abort();

@@ -33,6 +33,7 @@ import {
   llmProposeEdgeRelations as proposeEdgeRelationsLlm,
   analyzeChart as analyzeChartLlm,
   generateBoard as generateBoardLlm,
+  llmModifyBoard as llmModifyBoardLlm,
 } from './lib/llm';
 
 // 静态部署版（GitHub Pages）没有后端：关闭所有服务端持久化与回读，画布完全依赖 localStorage。
@@ -65,6 +66,13 @@ const NODE_COLOR_POOL = [
   'rgba(250, 245, 255, 0.9)', // purple-50
 ];
 const randomNodeColor = () => NODE_COLOR_POOL[Math.floor(Math.random() * NODE_COLOR_POOL.length)];
+
+// 轻量字符串哈希（djb2），用于给 AI 联想缓存做"内容指纹"，非加密用途。
+const hashStr = (s: string): number => {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0;
+  return h;
+};
 
 export default function App() {
   const [pages, setPages] = useState<Page[]>(() => {
@@ -126,8 +134,8 @@ export default function App() {
   const [isSuggestOpen, setIsSuggestOpen] = useState(false);
   // 当前正在"联想"的源节点 id（不再直接跟随选区，点击空白/操作不会丢失上下文）
   const [suggestForNodeId, setSuggestForNodeId] = useState<string | null>(null);
-  // 各节点的联想结果缓存（内存态，每个节点一份独立"对话记录"）
-  const [suggestByNode, setSuggestByNode] = useState<Record<string, { suggestions: Suggestion[]; error: string | null }>>({});
+  // 各节点的联想结果缓存（内存态，每个节点一份独立"对话记录"）——条目含 sig 指纹，供内容签名自动失效
+  const [suggestByNode, setSuggestByNode] = useState<Record<string, { suggestions: Suggestion[]; error: string | null; sig: string }>>({});
   const [suggestLoading, setSuggestLoading] = useState(false);
   // 「重新分析」时自增，驱动 fetch effect 重新跑（否则清缓存不会触发重组）
   const [suggestEpoch, setSuggestEpoch] = useState(0);
@@ -697,7 +705,7 @@ export default function App() {
 
   // AI 聊天 → 把一大段文字描述自动生成为画布上的节点 + 连线（可撤销，排版为网格）。
   // 返回一句给 AI 助手的回执文本；失败时抛错，由聊天面板展示报错。
-  // 浏览器静态版直接调用本地 generateBoardLlm（Base URL / Key 来自用户 localStorage）。
+// 浏览器静态版直接调用本地 generateBoardLlm（Base URL / Key 来自用户 localStorage）。
   const handleGenerateBoard = async (description: string): Promise<string> => {
     const cfg = loadConfig();
     if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
@@ -770,6 +778,125 @@ export default function App() {
     return `已在当前画布生成 ${newNodes.length} 个节点、${newEdges.length} 条连线${title ? `，主题「${title}」` : ''}；这些节点已自动加上标签「${title || '（无主题）'}」可筛查看全部。`;
   };
 
+// AI 聊天 → 针对「现有看板」做增量修改（update/add/delete/link/unlink），而不是整块重生成。
+  // 浏览器静态版直接调用本地 llmModifyBoardLlm（Base URL / Key 来自用户 localStorage）。
+  // 失败或没有落地动作时把说明抛给聊天面板展示，绝不脑补新内容。
+  const handleModifyBoard = async (
+    instruction: string,
+    history?: { role: string; content: string }[],
+  ): Promise<string> => {
+    const cfg = loadConfig();
+    if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+      throw new Error('请先在「LLM 设置」中配置 Base URL / 模型 / API Key（密钥仅保存在你的浏览器）');
+    }
+    const res = await llmModifyBoardLlm(
+      cfg,
+      nodes.map((n) => ({ id: n.id, type: n.type, content: n.content, x: n.x, y: n.y, width: n.width, height: n.height })),
+      edges.map((e) => ({ id: e.id, source: e.source, target: e.target })),
+      instruction,
+      history,
+    );
+    const actions: any[] = res.actions || [];
+    if (actions.length === 0) {
+      return '暂时没有从这条要求里解构出可落地的修改。可以试着说具体些，例如「把节点X的内容改成…」「把 A 连接到 B」「删除…」「帮我重新排版一下」。';
+    }
+
+    beginTransaction();
+
+    // 1) 先收集要删除的节点 id（同时会连带删掉相关连线）
+    const toDelete = new Set<string>();
+    actions.forEach((a) => { if (a.op === 'delete' && typeof a.id === 'string') toDelete.add(a.id); });
+
+    // 2) 新增节点：从当前视口中心附近铺开，避免落到屏幕外
+    const addBaseX = (window.innerWidth / 2 - x.get()) / scale.get() + 40;
+    const addBaseY = (window.innerHeight / 2 - y.get()) / scale.get() + 40;
+    const addNodes: NodeData[] = [];
+    actions.filter((a) => a.op === 'add').forEach((a, i) => {
+      const isMd = a.type === 'markdown';
+      addNodes.push({
+        id: Math.random().toString(36).substring(7),
+        type: isMd ? 'markdown' : 'text',
+        x: addBaseX + (i % 3) * 340 + (i % 2) * 20,
+        y: addBaseY + Math.floor(i / 3) * 236 + (i % 2) * 24,
+        content: isMd ? String(a.content || '') : textToHtml(String(a.content || '')),
+        color: randomNodeColor(),
+        width: isMd ? 420 : 300,
+        height: isMd ? 320 : undefined,
+        zIndex: maxZ + 1 + i,
+        ...(a.title ? { tags: [String(a.title).trim()] } : {}),
+      });
+    });
+    const addIds = new Set(addNodes.map((n) => n.id));
+    if (addNodes.length) setMaxZ((prev) => prev + addNodes.length);
+
+    const existingIds = new Set(nodes.map((n) => n.id));
+    const linkActs = actions.filter((a) => a.op === 'link' && a.source !== a.target && existingIds.has(a.source) && existingIds.has(a.target));
+
+    // 3) 连线：
+    //    去掉指向被删节点的连线 → 去掉 unlink 命中的连线 → 追加 link 新增连线
+    setEdges((prev) => {
+      let next = prev.filter((e) => !toDelete.has(e.source) && !toDelete.has(e.target));
+      actions.filter((a) => a.op === 'unlink').forEach((a) => {
+        next = next.filter(
+          (e) => !(e.source === a.source && e.target === a.target) && !(e.source === a.target && e.target === a.source),
+        );
+      });
+      const added: EdgeData[] = [];
+      linkActs.forEach((a) => {
+        const dup = next.some((e) => e.source === a.source && e.target === a.target);
+        if (dup) return;
+        added.push({
+          id: Math.random().toString(36).substring(7),
+          source: a.source,
+          target: a.target,
+          label: a.label ? String(a.label).trim().slice(0, 10) : undefined,
+          directed: true,
+        });
+      });
+      return [...next, ...added];
+    });
+
+    // 4) 节点：删掉目标 → 施加 update（改内容/标题/坐标）→ 追加新增
+    let updatedCount = 0;
+    setNodes((prev) => {
+      const kept = prev
+        .map((n) => {
+          if (toDelete.has(n.id)) return null;
+          const u = actions.find((a) => a.op === 'update' && a.id === n.id);
+          if (!u) return n;
+          const next: NodeData = { ...n };
+          if (typeof u.content === 'string' && u.content) {
+            next.content = (u.type === 'markdown') ? u.content : textToHtml(u.content);
+            updatedCount++;
+          }
+          if (typeof u.title === 'string' && u.title.trim() && !(n.tags || []).includes(u.title.trim())) {
+            next.tags = [...(n.tags || []), u.title.trim()];
+            updatedCount++;
+          }
+          if (typeof u.x === 'number' && Number.isFinite(u.x)) next.x = u.x;
+          if (typeof u.y === 'number' && Number.isFinite(u.y)) next.y = u.y;
+          return next;
+        })
+        .filter((n): n is NodeData => n !== null);
+      return kept.concat(addNodes);
+    });
+
+    setSelectedIds(new Set());
+    setSelectedEdgeIds(new Set());
+
+    const deletes = toDelete.size;
+    const links = linkActs.length;
+    const unlinks = actions.filter((a) => a.op === 'unlink').length;
+    const bits: string[] = [];
+    if (deletes) bits.push(`删除 ${deletes} 个节点`);
+    if (addNodes.length) bits.push(`新增 ${addNodes.length} 个节点`);
+    if (updatedCount) bits.push(`修改 ${updatedCount} 处节点内容`);
+    if (links) bits.push(`新增 ${links} 条连线`);
+    if (unlinks) bits.push(`移除 ${unlinks} 条连线`);
+    if (bits.length === 0) return '没有检测到实际变化。';
+
+    return `已按你的要求修改当前看板：${bits.join('、')}。可用 Ctrl+Z 撤销。`;
+  };
   // 标签筛选：多选 AND 匹配；__clear__ 清除
   const handleToggleTag = (tag: string) => {
     if (tag === '__clear__') {
@@ -940,9 +1067,16 @@ export default function App() {
     setLinkSource(null);
   };
 
-  // 联想面板里点「连线」→ 直接给源节点和目标节点加一条连线（不关闭面板）
+  // 联想面板里点「连线」→ 直接给源节点和目标节点加一条连线（不关闭面板）。
+  // 去重 + 源失效守卫：源==目标、源已不在画布、或两者已存在连线（任一向）时 noop。
   const handleConnectFromSuggest = (targetId: string) => {
-    if (!suggestForNodeId) return;
+    if (!suggestForNodeId || targetId === suggestForNodeId) return;
+    if (!nodes.find((n) => n.id === suggestForNodeId)) return;
+    const already = edges.some((e) =>
+      (e.source === suggestForNodeId && e.target === targetId) ||
+      (e.source === targetId && e.target === suggestForNodeId)
+    );
+    if (already) return;
     beginTransaction();
     setEdges((prev) => [
       ...prev,
@@ -950,41 +1084,49 @@ export default function App() {
     ]);
   };
 
-  // 面板打开期间：选区切换为单个节点时，把「联想源」切换到该节点（保留各自缓存）
-  useEffect(() => {
-    if (!isSuggestOpen) return;
-    if (selectedIds.size === 1) {
-      const nid = Array.from(selectedIds)[0];
-      setSuggestForNodeId((prev) => (prev === nid ? prev : nid));
-    }
-  }, [isSuggestOpen, selectedIds]);
+  // 显式换源：清掉当前源的缓存，把「联想源」切到画布上恰好选中的那个节点并触发重新拉取。
+  // 联想源与画布选区完全脱钩，只能通过此入口换源（点普通节点不会改源）。
+  const handleResetSource = (newSourceId: string) => {
+    if (selectedIds.size !== 1) return;
+    if (newSourceId === suggestForNodeId) return;
+    setSuggestByNode((prev) => {
+      const next = { ...prev };
+      delete next[suggestForNodeId ?? ''];
+      return next;
+    });
+    setSuggestForNodeId(newSourceId);
+    setSuggestEpoch((e) => e + 1);
+  };
 
-  // 按节点拉取 AI 联想：该节点已有缓存则直接复用，不重复请求
-  // 守卫用 ref 读最新缓存；epoch 变化（重新分析）时强制重新拉取
+  // 按节点拉取 AI 联想：缓存按"内容指纹"（sig）自动失效——画布任一节点的 id/类型/内容变化，
+  // 该源的缓存即视为过期并重新请求。守卫用 ref 读最新缓存；epoch 变化（重新分析/换源）时强制重拉。
   useEffect(() => {
     if (!isSuggestOpen || !suggestForNodeId) return;
-    if (suggestCacheRef.current[suggestForNodeId]) return; // 已有结果，保留（不清空）
     const src = nodes.find((n) => n.id === suggestForNodeId);
     if (!src) return;
+    const sig = nodes.map((n) => `${n.id}|${n.type}|${hashStr(n.content || '')}`).join('|');
+    const cached = suggestCacheRef.current[suggestForNodeId];
+    if (cached && cached.sig === sig && !cached.error) return; // 指纹一致 → 直接复用
     setSuggestLoading(true);
     const ctrl = new AbortController();
     (async () => {
       try {
-        const cfg = loadConfig();
+const cfg = loadConfig();
         if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
-          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: '请先在「LLM 设置」中配置 Base URL / 模型 / API Key' } }));
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: '请先在「LLM 设置」中配置 Base URL / 模型 / API Key', sig } }));
           return;
         }
         const data = await associateNodesLlm(cfg, nodes, suggestForNodeId, 5);
         if (!ctrl.signal.aborted) {
-          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: data.suggestions || [], error: null } }));
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: data.suggestions || [], error: null, sig } }));
         }
       } catch (e: any) {
         if (e?.name !== 'AbortError') {
-          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: e?.message || '请求失败' } }));
+          setSuggestByNode((prev) => ({ ...prev, [suggestForNodeId]: { suggestions: [], error: e?.message || '请求失败', sig } }));
         }
       } finally {
-        setSuggestLoading(false);
+        // 只在当前请求未被 abort 时才停 spinner：避免被上一轮的清理覆盖，造成闪烁
+        if (!ctrl.signal.aborted) setSuggestLoading(false);
       }
     })();
     return () => ctrl.abort();
@@ -997,6 +1139,12 @@ export default function App() {
     setSuggestByNode({});
     setSuggestLoading(false);
   }, [currentPageId]);
+
+  // maxZ 与当前画布最高 zIndex 调和：任何 nodes 被替换（导入/模板/切页/持久化/服务端）后，
+  // 把 maxZ 抬到最高，避免「置顶/新建节点落到旧的高 z 节点之下」；其余时刻为 no-op。
+  useEffect(() => {
+    setMaxZ((cur) => Math.max(cur, ...nodes.map((n) => n.zIndex || 1)));
+  }, [nodes]);
 
   // 关闭面板 → 清空全部联想缓存（下次打开重新分析）
   const closeSuggest = () => {
@@ -1018,10 +1166,46 @@ export default function App() {
     setSuggestEpoch((e) => e + 1);
   };
 
-  // 工具栏开关：打开仅置 true；关闭走 closeSuggest（与 ✕ 行为一致，清空缓存）
-  const toggleSuggest = () => {
-    if (isSuggestOpen) closeSuggest();
-    else setIsSuggestOpen(true);
+  // 右抽屉互斥：打开一个时关掉其余两个（三个抽屉共用同一固定槽位，避免互相遮挡）。
+  // except 之外的都关闭；'suggest' 分支顺带清空其缓存，与 closeSuggest 一致。
+  const closeOtherDrawers = (except: 'chat' | 'suggest' | 'tag') => {
+    if (except !== 'chat') setIsChatOpen(false);
+    if (except !== 'suggest') {
+      setIsSuggestOpen(false);
+      setSuggestForNodeId(null);
+      setSuggestByNode({});
+      setSuggestLoading(false);
+    }
+    if (except !== 'tag') setIsTagPanelOpen(false);
+  };
+
+  const handleToggleChat = () => {
+    if (isChatOpen) {
+      setIsChatOpen(false);
+      return;
+    }
+    closeOtherDrawers('chat');
+    setIsChatOpen(true);
+  };
+
+  const handleToggleTagPanel = () => {
+    if (isTagPanelOpen) {
+      setIsTagPanelOpen(false);
+      return;
+    }
+    closeOtherDrawers('tag');
+    setIsTagPanelOpen(true);
+  };
+
+  // 工具栏联想想按钮：打开时捕获当前单选节点为联想源；关闭走 closeSuggest（与 ✕ 行为一致，清空缓存）
+  const handleToggleSuggest = () => {
+    if (isSuggestOpen) {
+      closeSuggest();
+      return;
+    }
+    closeOtherDrawers('suggest');
+    setIsSuggestOpen(true);
+    setSuggestForNodeId(selectedIds.size === 1 ? Array.from(selectedIds)[0] : null);
   };
 
   // ---- 连线增强：从节点边缘拖出预览线，松开时连线或新建节点 ----
@@ -1532,8 +1716,8 @@ export default function App() {
     fitViewport(nodes.map((n) => ({ id: n.id, x: n.x, y: n.y })));
   };
 
-  // ---- AI 生成图表：读取表格数据 → /api/llm/chart → 在表格右侧创建 chart 节点 ----
-  const handleGenerateChart = useCallback(async (tableNodeId: string) => {
+  // ---- AI 生成图表：读取表格数据 → 浏览器端 analyzeChartLlm → 在表格右侧创建 chart 节点 ----
+  const handleGenerateChart = useCallback(async (tableNodeId: string, instruction?: string) => {
     const table = nodesRef.current.find((n) => n.id === tableNodeId);
     if (!table || !table.tableData || table.tableData.length < 2) {
       alert('表格至少需要表头 + 一行数据才能生成图表');
@@ -1541,14 +1725,14 @@ export default function App() {
     }
     setGeneratingChartId(tableNodeId);
     try {
-      // TableCell[][] → string[][]
-      const rows = table.tableData.map((row) => row.map((c) => c.text));
+// TableCell[][] → Cell[][]：保留表头语义，供 AI 理解
+      const rows = table.tableData.map((row) => row.map((c) => ({ text: c.text, isHeader: c.isHeader })));
       const cfg = loadConfig();
       if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
         alert('请先在「LLM 设置」中配置 Base URL / 模型 / API Key');
         return;
       }
-      const data = await analyzeChartLlm(cfg, rows);
+      const data = await analyzeChartLlm(cfg, rows, instruction);
       if (Array.isArray(data.data) && data.data.length > 0) {
         beginTransaction();
         const tw = table.width || 480;
@@ -1568,6 +1752,9 @@ export default function App() {
             title: data.title,
             xAxis: data.xAxis,
             yAxis: data.yAxis,
+            unit: data.unit,
+            insight: data.insight,
+            series: Array.isArray(data.series) ? data.series.map((s: any) => s.name).filter(Boolean) : undefined,
             data: data.data,
           },
         };
@@ -1742,18 +1929,6 @@ export default function App() {
           dragEdge={dragEdge}
         />
 
-        {marquee && (
-          <div
-            className="absolute border-2 border-blue-500 bg-blue-500/10 pointer-events-none z-10"
-            style={{
-              left: marquee.x0,
-              top: marquee.y0,
-              width: marquee.x1 - marquee.x0,
-              height: marquee.y1 - marquee.y0,
-            }}
-          />
-        )}
-
         <div className="absolute inset-0 pointer-events-none *:pointer-events-auto">
           {visibleNodes.map(node => {
             return (
@@ -1776,6 +1951,20 @@ export default function App() {
           })}
         </div>
       </motion.div>
+
+      {/* 选框抬出 motion.div 的 stacking context：用 fixed 覆盖层 + world→screen 换算，
+          使其天然高于任意节点 z。命中检测仍在 onMove 的世界坐标里完成。 */}
+      {marquee && (
+        <div
+          className="fixed border-2 border-blue-500 bg-blue-500/10 pointer-events-none z-[55]"
+          style={{
+            left: marquee.x0 * scale.get() + x.get(),
+            top: marquee.y0 * scale.get() + y.get(),
+            width: (marquee.x1 - marquee.x0) * scale.get(),
+            height: (marquee.y1 - marquee.y0) * scale.get(),
+          }}
+        />
+      )}
 
       <Minimap nodes={nodes} x={x} y={y} scale={scale} />
       <ViewportControls
@@ -1860,12 +2049,12 @@ export default function App() {
         onAdd={handleAddNode}
         isLinking={isLinking}
         onToggleLink={toggleLinking}
-        onToggleChat={() => setIsChatOpen((o) => !o)}
+        onToggleChat={handleToggleChat}
         isChatOpen={isChatOpen}
         onToggleSearch={() => setIsSearchOpen((o) => !o)}
-        onToggleTagPanel={() => setIsTagPanelOpen((o) => !o)}
+        onToggleTagPanel={handleToggleTagPanel}
         isTagPanelOpen={isTagPanelOpen}
-        onToggleSuggest={toggleSuggest}
+        onToggleSuggest={handleToggleSuggest}
         isSuggestOpen={isSuggestOpen}
         hasSingleSelection={selectedIds.size === 1}
         onAiOrganize={handleAiOrganize}
@@ -1888,7 +2077,7 @@ export default function App() {
 
       {linkSource && (
         <div className="fixed top-8 left-1/2 -translate-x-1/2 bg-blue-500 text-white px-4 py-2 rounded-full shadow-lg pointer-events-none z-50">
-          Select target node to connect...
+          选择目标节点以连线…
         </div>
       )}
 
@@ -1931,6 +2120,7 @@ export default function App() {
         onClear={handleClearChat}
         onInsertNode={handleInsertAiNode}
         onGenerateBoard={handleGenerateBoard}
+        onModifyBoard={handleModifyBoard}
       />
 
       <TagPanel
@@ -1958,6 +2148,9 @@ export default function App() {
         onFocus={focusNode}
         onConnect={handleConnectFromSuggest}
         onReanalyze={handleReanalyze}
+        selectedNodeId={selectedIds.size === 1 ? Array.from(selectedIds)[0] : null}
+        onResetSource={handleResetSource}
+        canResetSource={selectedIds.size === 1 && Array.from(selectedIds)[0] !== suggestForNodeId}
       />
 
       <input

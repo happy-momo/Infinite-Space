@@ -574,42 +574,93 @@ export async function streamLlm(
   }
 }
 
+/** 表格单元格（语义富化：isHeader 标记是否表头） */
+export interface Cell {
+  text: string;
+  isHeader?: boolean;
+}
+
+/** 多系列（图表）定义：名称 + 单位 */
+export interface ChartSeries {
+  name: string;
+  unit?: string;
+}
+
 export interface ChartResult {
   chartType: 'bar' | 'line' | 'pie';
   title: string;
   xAxis: string;
   yAxis: string;
-  data: { label: string; value: number }[];
-  reason: string;
+  data: { label: string; value: number; series?: string }[];
+  /** 主数值列单位（% / 万元 / 元 / 件…），供轴与数值标注 */
+  unit?: string;
+  /** 多序列定义（含各系列单位） */
+  series?: ChartSeries[];
+  /** 一句话数据洞察（基于真实数据的最关键结论） */
+  insight?: string;
+  reason?: string;
+  /** 数据被截断时为 true，提示用户非全量 */
+  truncated?: boolean;
+}
+
+// 注意：不要用 \b（JS 的 \b 只认 ASCII \w，纯中文“合计”结尾不构成边界，会漏判）
+const TOTAL_RE = /^(合计|总计|小计|汇总|总计合计|Total|Subtotal|Grand\s*Total|Sum)/i;
+
+// 判断某行是否为合计/汇总行（首格命中关键字）
+function isTotalRow(row: Cell[]): boolean {
+  const first = String(row[0]?.text ?? '').trim();
+  return TOTAL_RE.test(first);
+}
+
+function cellText(c: Cell | undefined): string {
+  return String(c?.text ?? '').trim();
 }
 
 // AI 分析表格数据，决定图表类型并清洗出数值数据。
-// 只允许返回 bar/line/pie 三种类型；数值由模型从表格中提取。
+// 支持多系列(series)、单位(unit)、数据洞察(insight)；保留表头/合计语义。
+// 只允许返回 bar/line/pie；数值由模型从表格中提取。
 export async function analyzeChart(
   cfg: LlmConfig,
-  rows: string[][],
+  rows: Cell[][],
   instruction?: string,
 ): Promise<ChartResult> {
   if (!rows.length) throw new LlmError('表格为空，无法生成图表');
-  const tableText = rows.slice(0, 50).map((r) => r.join(' | ')).join('\n');
+
+  // 第一个 isHeader 行视为表头（退化到行 0）；合计/汇总行仅作参考说明、不纳入 data。
+  const headerRow = rows.find((r) => r.some((c) => c?.isHeader)) || rows[0];
+  const dataRows = rows.filter((r) => r !== headerRow && !isTotalRow(r));
+  const truncated = dataRows.length > 48;
+  const shown = dataRows.slice(0, 48);
+
+  const parts: string[] = [];
+  if (headerRow) parts.push(`[表头] ${headerRow.slice(0, 30).map(cellText).join(' | ')}`);
+  shown.forEach((r, i) => parts.push(`[${i + 1}] ${r.slice(0, 30).map(cellText).join(' | ')}`));
+  if (truncated) parts.push(`...(数据行超 48，仅展示前 48 行，共 ${dataRows.length} 行)`);
+  const tableText = parts.join('\n');
+
+  const totalNote = rows.some(isTotalRow)
+    ? '注：表格含「合计/汇总」行，仅作参考、不要计入 data。'
+    : '';
 
   const system =
-    '你是一个数据可视化助手。只返回 JSON，不要多余文字，不要 markdown。';
+    '你是数据可视化与分析助手。只返回 JSON，不要多余文字，不要 markdown。';
   const user = `
-下面是用户表格数据（第一行通常是表头）：
+给定表格数据（表头已标注为 [表头]，其余为数据行；[n] 是行序号）：
 ${tableText}
+${totalNote}
 ${instruction ? `\n用户的额外要求：${instruction}` : ''}
 
-请分析这些数据，并决定用哪种图表展示最合适（bar=柱状图 / line=折线图 / pie=饼图）。
-要求：
-1. chartType 只能取 "bar"、"line"、"pie" 三者之一。
-2. title 用简短中文标题（不超过 20 字）。
-3. 选择一个合适的"类别"列作为 label（如名称、月份、类型），选择一个"数值"列作为 value（必须是数字；若是百分比、货币、千分位等，请先转换为纯数字，例如 85.5% → 85.5，¥1,200 → 1200）。
-4. data 数组：每个条目 {label, value}，label 取类别值，value 取对应数值。不要遗漏数据行。
-5. reason 用一句话说明为什么选这种图表（不超过 40 字）。
+请先判断这组数据适合被用来回答什么问题（对比／趋势／构成占比／分布／排名），再结合用户的额外要求（若有）决定图表：
+- 图类型：bar 柱状=类别对比；line 折线=随时间或有序类别看趋势；pie 饼图=部分占整体的构成（仅当各值可视为整体的一部分、且整体≈100% 的语义时）。
+- 类别数超过 7 时，柱状图可只取前 N 项或合并“其他”。
+- 存在重复类别或明细行过多时，先按类别聚合（累计用求和，比率用均值）。
+- 若有多列数值，请选 1 个类别列 + 1~N 个数值列生成多系列；多系列时 yAxis 写主数值列名，并在 series 中给出每个系列的 name 与 unit。
+- 数值规范化：货币/百分比/千分位转纯数字但保留单位。单系列时把该列单位写入 unit；多系列时 unit 置空字符串 ""，把各系列单位分别写入 series[].unit。
+- 只用给定数据，严禁编造或补齐缺失值；无法确定的值跳过该行，不得假设。
+- title 简洁中文（≤20字）；insight 用一句话（≤40字）概括最关键结论（最高/最低/趋势/异常/占比最大），必须基于真实数据。
 
 只返回 JSON，格式：
-{"chartType":"bar","title":"标题","xAxis":"列名","yAxis":"列名","data":[{"label":"...","value":123}],"reason":"..."}
+{"chartType":"bar","title":"标题","xAxis":"类别列","yAxis":"数值列","unit":"单位","series":[{"name":"系列名","unit":"单位"}],"data":[{"label":"类别值","value":123,"series":"系列名"}],"insight":"一句话洞察","reason":"选型理由","truncated":false}
 `;
 
   const text = await callLlm(cfg, system, user);
@@ -619,21 +670,38 @@ ${instruction ? `\n用户的额外要求：${instruction}` : ''}
   const ct = parsed.chartType;
   if (ct !== 'bar' && ct !== 'line' && ct !== 'pie') throw new LlmError(`不支持的图表类型: ${ct}`);
 
-  const data: { label: string; value: number }[] = Array.isArray(parsed.data)
+  const data: { label: string; value: number; series?: string }[] = Array.isArray(parsed.data)
     ? parsed.data
-        .filter((d: any) => d && typeof d.label === 'string' && typeof d.value === 'number' && isFinite(d.value))
-        .map((d: any) => ({ label: d.label, value: d.value }))
+        .filter((d: any) => d && typeof d.label === 'string' && typeof d.value === 'number' && isFinite(d.value) && !TOTAL_RE.test(String(d.label)))
+        .map((d: any) => ({
+          label: d.label,
+          value: d.value,
+          ...(typeof d.series === 'string' && d.series ? { series: d.series } : {}),
+        }))
     : [];
 
   if (data.length === 0) throw new LlmError('未能从表格中提取到有效的数值数据');
 
+  const series = Array.isArray(parsed.series)
+    ? parsed.series
+        .filter((s: any) => s && typeof s.name === 'string' && s.name)
+        .map((s: any) => ({ name: s.name, unit: typeof s.unit === 'string' ? s.unit : undefined }))
+    : undefined;
+
+  // 多系列时单位属于各系列（series[].unit），主 unit 留空避免轴标注歧义
+  const effectiveUnit = series && series.length > 1 ? undefined : parsed.unit;
+
   return {
     chartType: ct,
-    title: typeof parsed.title === 'string' ? parsed.title : '数据图表',
+    title: typeof parsed.title === 'string' && parsed.title ? parsed.title : '数据图表',
     xAxis: typeof parsed.xAxis === 'string' ? parsed.xAxis : '',
     yAxis: typeof parsed.yAxis === 'string' ? parsed.yAxis : '',
     data,
+    unit: typeof effectiveUnit === 'string' && effectiveUnit ? effectiveUnit : undefined,
+    series,
+    insight: typeof parsed.insight === 'string' && parsed.insight ? parsed.insight : undefined,
     reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+    truncated,
   };
 }
 
@@ -688,6 +756,116 @@ ${listText}
     }));
 
   return { suggestions };
+}
+
+export interface GeneratedNode {
+  type: 'text' | 'markdown';
+  title?: string;
+  content: string;
+}
+export interface GeneratedEdge {
+  from: number; // 索引进 nodes
+  to: number;
+  label?: string;
+}
+export interface GeneratedBoard {
+  title?: string;
+  nodes: GeneratedNode[];
+  edges: GeneratedEdge[];
+}
+
+// AI 根据用户给的文字描述，自动拆解成一组概念节点 + 它们之间的关系连线，
+// 客户端负责把这两个结果落到无限画布上（排版由客户端控制）。
+// 描述可以是一大段具体内容，也可以是"帮我创作一个画布"这类简短的创作请求——
+// 后者由模型发挥创意、自主构思主题（可选参考当前看板的已有主题）。
+export async function generateBoard(
+  cfg: LlmConfig,
+  description: string,
+  maxNodes: number = 30,
+  context?: { pageName?: string; titles?: string[] },
+): Promise<GeneratedBoard> {
+  const desc = String(description || '').trim();
+  if (!desc) throw new LlmError('描述不能为空');
+
+  const system = 'You are a canvas content designer. Return ONLY a valid JSON object. No markdown, no explanation.';
+  const user = `
+你是「无限画布」的内容解构器。用户会输入一段文字/想法描述，请把它拆解成一组概念节点，并标注节点之间的关系连线，供自动排版到无限画布上。
+
+拆解规则：
+1. 从描述中提取 ${maxNodes} 个以内（最少 3 个）关键概念、条目、观点或事实，每个成为一个节点。信息量大就多拆，量小就少拆。
+2. 每个节点给一个短标题（title，不超过 12 字）和一段要点式内容（content，要点化、保留关键细节，不超过 120 字；普通要点/一句话用 text，需要列表/代码/小组件结构时用 markdown）。
+3. type 只允许 "text" 或 "markdown"。
+4. 用节点数组的索引表达关系（from/to，从 0 开始）：包含、因果、步骤、递进、举例、对比、相关等。为每条连线给一个简短关系标签（label，不超过 10 字），如「包含」「因果」「步骤」「举例」「对比」。不要产生自身环，避免重复连线。
+5. 若存在一个核心主题，请在顶层给出 title（看板主题，不超过 20 字）。
+
+【重要】当用户的描述只是一句"帮我创作/设计/生成一个画布或看板"这类创建请求、而没有具体内容时：
+- 请发挥创意，自主构思一个有意义、可落地的看板主题，再按上面规则为这个自创主题拆出节点和连线；不要返回空，也不要报错。
+- 优先从当前看板已有主题延伸（见下方"当前看板参考"，若能基于其中某个主题创作会更贴合）；否则自创新主题。
+- 这属于创作场景，允许合理构思；但若描述里含有需要忠实转述的具体文字内容，则仍须忠于原文、不要编造。
+
+当前看板参考（可选，创作无明确主题时可借鉴）：
+页面「${context?.pageName || '未命名'}」；已有节点标题：${(context?.titles || []).slice(0, 15).join('、') || '（无）'}
+
+用户的描述/请求：
+${desc.slice(0, 12000)}
+
+只返回 JSON，不要任何多余文字，格式：
+{"title":"主题","nodes":[{"type":"text","title":"短标题","content":"要点内容"}],"edges":[{"from":0,"to":1,"label":"关系"}]}
+`;
+
+  let text = await callLlm(cfg, system, user);
+  let parsed: unknown;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    text = await callLlm(cfg, system, `${user}\n\n你上一次的输出不是合法 JSON。请只输出上述 JSON 格式，不要任何多余内容。`);
+    parsed = extractJson(text);
+  }
+
+  const raw = parsed as any;
+  const title = typeof raw?.title === 'string' ? raw.title.replace(/["“”‘’《》]/g, '').trim().slice(0, 40) : '';
+
+  const rawNodes = Array.isArray(raw?.nodes) ? raw.nodes : [];
+  const nodes: GeneratedNode[] = [];
+  for (const n of rawNodes) {
+    if (!n || typeof n !== 'object') continue;
+    const content = typeof n.content === 'string' ? n.content.trim() : '';
+    if (!content) continue;
+    const type = n.type === 'markdown' ? 'markdown' : 'text';
+    nodes.push({
+      type,
+      content: content.slice(0, 400),
+      title: typeof n.title === 'string' ? n.title.trim().slice(0, 30) : undefined,
+    });
+    if (nodes.length >= maxNodes) break;
+  }
+  if (nodes.length === 0) {
+    throw new LlmError('模型未能从描述中解构出有效节点，请换一种描述方式再试');
+  }
+
+  // 关系连线：索引必须在合法范围内、非自环、去重。
+  const seen = new Set<string>();
+  const edges: GeneratedEdge[] = [];
+  const rawEdges = Array.isArray(raw?.edges) ? raw.edges : [];
+  for (const e of rawEdges) {
+    if (!e || typeof e !== 'object') continue;
+    // 接受数字或字符串索引（部分模型把数字序列化成字符串）
+    let from = Number(e.from ?? NaN);
+    let to = Number(e.to ?? NaN);
+    if (!Number.isInteger(from) || !Number.isInteger(to)) continue;
+    if (from < 0 || to < 0 || from >= nodes.length || to >= nodes.length || from === to) continue;
+    const key = `${from}:${to}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    edges.push({
+      from,
+      to,
+      label: typeof e.label === 'string' ? e.label.trim().slice(0, 10) : undefined,
+    });
+    if (edges.length >= 200) break;
+  }
+
+  return { title, nodes, edges };
 }
 
 export async function testConnection(cfg: LlmConfig): Promise<string> {
@@ -773,4 +951,131 @@ ${listText}
     .filter((r: EdgeRelation) => r.label.length > 0);
 
   return { relations };
+}
+
+// ---- AI 修改画布（针对现有看板做增量编辑，而不是整块重生成）----
+// 修正"要求修改现有看板却生成了全新内容"的问题：
+// 该调用产出对"现有节点/连线"的增量操作（update/add/delete/link/unlink），
+// 且只接受引用真实 id 的动作；无法落地的动作一律丢弃，绝不脑补新主题。
+
+export type ModifyNodeAction =
+  | { op: 'update'; id: string; content?: string; title?: string; x?: number; y?: number }
+  | { op: 'add'; type: 'text' | 'markdown'; title?: string; content: string }
+  | { op: 'delete'; id: string }
+  | { op: 'link'; source: string; target: string; label?: string }
+  | { op: 'unlink'; source: string; target: string };
+
+export interface ModifyBoardResult {
+  title?: string;
+  actions: ModifyNodeAction[];
+}
+
+export async function llmModifyBoard(
+  cfg: LlmConfig,
+  nodes: NodeInput[],
+  edges: EdgeInput[],
+  instruction: string,
+  history?: { role: string; content: string }[],
+): Promise<ModifyBoardResult> {
+  const nodeArr = Array.isArray(nodes) ? nodes : [];
+  const edgeArr = Array.isArray(edges) ? edges : [];
+  const byId = new Map(nodeArr.map((n) => [n.id, n]));
+  const list = nodeArr
+    .slice(0, 60)
+    .map((n) => `- id:${n.id} | type:${n.type} | ${serializeContent(n).replace(/\s+/g, ' ').slice(0, 120)}`)
+    .join('\n');
+  const edgeList = edgeArr
+    .slice(0, 120)
+    .map((e) => `- ${e.source} → ${e.target}${e.id ? ` (id:${e.id})` : ''}`)
+    .join('\n');
+
+  const hist = Array.isArray(history) && history.length
+    ? history.slice(-8).map((h) => `${h.role}: ${String(h.content || '').slice(0, 500)}`).join('\n')
+    : '';
+
+  const system =
+    '你是无限画布的编辑助手。用户会给出现有看板的节点/连线快照和修改要求。只返回 JSON，不要多余文字。';
+  const user = `
+现在看板的节点快照（id 是真实 id，必须原样引用，绝不允许编造或改动 id）：
+${list || '（无节点）'}
+
+现有连线：
+${edgeList || '（无连线）'}
+${hist ? `\n最近的对话如下，请结合上下文理解用户要求：\n${hist}` : ''}
+
+用户的修改要求：
+${String(instruction || '').slice(0, 4000)}
+
+请把上面的修改要求解构成一组对"现有看板"的增量操作。只支持以下 5 种 op：
+- update: 修改某个已有节点（id 必须引用上面的真实 id；content 用纯文本或 markdown，title 为可选短标题；若只是重新排版可给 x,y 新坐标）。
+- add: 新增一个节点（type 只能 "text" 或 "markdown"，content 必填，title 可选）。
+- delete: 删除某个已有节点（id 必须真实）。
+- link: 在两个已有节点之间加连线（source/target 必须真实且不相等，label 为简短关系）。
+- unlink: 移除两个已有节点之间的连线（source/target 必须真实）。
+
+铁律：
+- update/delete/link/unlink 只能引用上面列出的真实 id；id 不在列表中的动作会被丢弃。
+- 不要对没有实际修改需求的节点生成 update。
+- 若给不出可落地的具体动作（比如要求太含糊），返回空 actions，绝不要为了"交差"而编造内容或生成新主题。
+
+只返回如下 JSON（不要 markdown）：
+{"title":"（可选）一句修改说明","actions":[{"op":"update","id":"<真实id>","content":"...","title":"...","x":0,"y":0},{"op":"add","type":"text","content":"...","title":"..."},{"op":"delete","id":"<真实id>"},{"op":"link","source":"<真实id>","target":"<真实id>","label":"关系"},{"op":"unlink","source":"<真实id>","target":"<真实id>"}]}
+`;
+
+  let text = await callLlm(cfg, system, user);
+  let parsed: unknown;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    text = await callLlm(cfg, system, `${user}\n\n上次输出不是合法 JSON，请只输出规定的 JSON 格式，不要多余内容。`);
+    parsed = extractJson(text);
+  }
+
+  const raw = parsed as any;
+  const title = typeof raw?.title === 'string' ? String(raw.title).trim().slice(0, 40) : '';
+  const rawActions = Array.isArray(raw?.actions) ? raw.actions : [];
+  const actions: ModifyNodeAction[] = [];
+  const fin = (v: unknown): boolean => typeof v === 'number' && Number.isFinite(v);
+
+  for (const a of rawActions) {
+    if (!a || typeof a !== 'object') continue;
+    const op = a.op;
+    if (op === 'update') {
+      const id = typeof a.id === 'string' ? a.id : '';
+      if (!byId.has(id)) continue;
+      const act: { op: 'update'; id: string; content?: string; title?: string; x?: number; y?: number } = { op: 'update', id };
+      if (typeof a.content === 'string' && a.content.trim()) act.content = sanitizeText(a.content).slice(0, 400);
+      if (typeof a.title === 'string' && a.title.trim()) act.title = a.title.trim().slice(0, 30);
+      if (fin(a.x)) act.x = Math.max(-100000, Math.min(100000, a.x));
+      if (fin(a.y)) act.y = Math.max(-100000, Math.min(100000, a.y));
+      if (act.content !== undefined || act.title !== undefined || act.x !== undefined || act.y !== undefined) {
+        actions.push(act);
+      }
+    } else if (op === 'add') {
+      const content = typeof a.content === 'string' ? sanitizeText(a.content).slice(0, 400) : '';
+      if (!content) continue;
+      const type = a.type === 'markdown' ? 'markdown' : 'text';
+      const act: { op: 'add'; type: 'text' | 'markdown'; content: string; title?: string } = { op: 'add', type, content };
+      if (typeof a.title === 'string' && a.title.trim()) act.title = a.title.trim().slice(0, 30);
+      actions.push(act);
+    } else if (op === 'delete') {
+      const id = typeof a.id === 'string' ? a.id : '';
+      if (byId.has(id)) actions.push({ op: 'delete', id });
+    } else if (op === 'link') {
+      const s = typeof a.source === 'string' ? a.source : '';
+      const t = typeof a.target === 'string' ? a.target : '';
+      if (s !== t && byId.has(s) && byId.has(t)) {
+        const act: { op: 'link'; source: string; target: string; label?: string } = { op: 'link', source: s, target: t };
+        if (typeof a.label === 'string' && a.label.trim()) act.label = a.label.trim().slice(0, 10);
+        actions.push(act);
+      }
+    } else if (op === 'unlink') {
+      const s = typeof a.source === 'string' ? a.source : '';
+      const t = typeof a.target === 'string' ? a.target : '';
+      if (s !== t && byId.has(s) && byId.has(t)) actions.push({ op: 'unlink', source: s, target: t });
+    }
+    if (actions.length >= 100) break;
+  }
+
+  return { title, actions };
 }

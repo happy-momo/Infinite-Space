@@ -163,7 +163,7 @@ interface Props {
   /** 从节点边缘拖出，开始连线/新建节点（P0 连线增强） */
   onDragEdgeStart: (e: React.PointerEvent, sourceId: string) => void;
   /** 表格节点：请求 AI 生成图表 */
-  onGenerateChart?: (tableNodeId: string) => void;
+  onGenerateChart?: (tableNodeId: string, instruction?: string) => void;
   /** 该表格节点是否正在生成图表 */
   isGeneratingChart?: boolean;
 }
@@ -394,14 +394,14 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
             onChange={e => onUpdate(node.id, { fontSize: parseInt(e.target.value) || 14 })}
             className="w-14 bg-transparent border border-transparent focus:border-blue-500 outline-none text-center hover:bg-black/5 rounded-lg px-1 py-1.5 transition-colors font-medium text-gray-700 dark:text-gray-200 dark:hover:bg-white/10"
             min="8" max="120"
-            title="Font Size"
+            title="字号"
             onFocus={() => onTransactionStart()}
           />
           <div className="w-px h-5 bg-gray-200 dark:bg-white/10" />
           <button
             onPointerDown={handleBoldClick}
             className={`w-9 h-9 flex items-center justify-center rounded-lg transition-all ${node.fontWeight === 'bold' ? 'bg-blue-100 text-blue-700 shadow-sm dark:bg-blue-500/30 dark:text-blue-300' : 'hover:bg-black/5 text-gray-600 dark:hover:bg-white/10 dark:text-gray-300'}`}
-            title="Bold Selection / Global Bold"
+            title="加粗选中 / 全部加粗"
           >
             <b>B</b>
           </button>
@@ -434,7 +434,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
                  }
                }}
                className="p-1.5 hover:bg-black/10 rounded-full text-gray-500 transition-colors"
-               title={isEditing ? "Save" : "Edit"}
+               title={isEditing ? "保存" : "编辑"}
              >
                {isEditing ? <Check size={15} /> : <Edit2 size={15} />}
              </button>
@@ -442,7 +442,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
            {node.type === 'image' && (
              <label
                className="p-1.5 hover:bg-black/10 rounded-full text-gray-500 hover:text-blue-500 transition-colors cursor-pointer"
-               title="Upload Image"
+               title="上传图片"
                onPointerDown={(e) => e.stopPropagation()}
              >
                <Upload size={15} />
@@ -535,7 +535,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
               node={node}
               onUpdate={onUpdate}
               onTransactionStart={onTransactionStart}
-              onGenerateChart={() => onGenerateChart?.(node.id)}
+              onGenerateChart={(inst) => onGenerateChart?.(node.id, inst)}
               generating={isGeneratingChart}
             />
           </div>
@@ -617,7 +617,7 @@ export const CanvasNode = memo(function CanvasNode({ node, onRemove, onUpdate, b
                   <div key={link.id} className="flex flex-col gap-2 p-2 bg-white/60 rounded-xl border border-black/5 relative group/linkedit shadow-sm">
                     <input
                       type="text"
-                      placeholder="Display Text"
+                      placeholder="显示文本"
                       value={link.title}
                       onChange={e => {
                         const newLinks = [...links];

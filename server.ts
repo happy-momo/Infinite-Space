@@ -13,7 +13,7 @@ import {
   saveState,
   AppState,
 } from "./server/storage";
-import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, LlmError } from "./server/llm";
+import { organizeNodes, summarizeBoard, testConnection, streamLlm, associateNodes, analyzeChart, llmProposeEdgeRelations, generateBoard, llmModifyBoard, LlmError, Cell } from "./server/llm";
 
 dotenv.config();
 
@@ -206,6 +206,58 @@ async function startServer() {
     }
   });
 
+  // ---- AI Generate Board (turn a description into nodes + edges on canvas) ----
+  app.post("/api/llm/generate-board", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { description, count, context } = req.body || {};
+      if (typeof description !== "string" || !description.trim()) {
+        return res.status(400).json({ error: "缺少描述内容" });
+      }
+      const max = Math.min(60, Math.max(3, Number(count) || 30));
+      const ctx = (context && typeof context === "object") ? {
+        pageName: typeof context.pageName === "string" ? context.pageName : undefined,
+        titles: Array.isArray(context.titles) ? context.titles.filter((t: any) => typeof t === "string").slice(0, 15) : undefined,
+      } : undefined;
+      const board = await generateBoard(cfg, description, max, ctx);
+      res.json({ board });
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
+    }
+  });
+
+  // ---- AI Modify Board (incremental edits to the EXISTING board, not fresh generation) ----
+  app.post("/api/llm/modify-board", async (req, res) => {
+    try {
+      const cfg = loadLlmConfig();
+      if (!cfg?.apiKey || !cfg.model || !cfg.baseUrl) {
+        return res.status(400).json({ error: "请先在设置中配置 LLM（Base URL / 模型 / API Key）" });
+      }
+      const { instruction, nodes, edges, history } = req.body || {};
+      if (typeof instruction !== "string" || !instruction.trim()) {
+        return res.status(400).json({ error: "缺少修改要求" });
+      }
+      if (!Array.isArray(nodes)) {
+        return res.status(400).json({ error: "Invalid nodes data" });
+      }
+      const result = await llmModifyBoard(
+        cfg,
+        nodes,
+        Array.isArray(edges) ? edges : [],
+        instruction,
+        Array.isArray(history) ? history : undefined,
+      );
+      res.json(result);
+    } catch (error) {
+      const msg = error instanceof LlmError ? error.message : (error as Error).message;
+      res.status(502).json({ error: msg });
+    }
+  });
+
   // ---- AI Edge Relations (propose relationship labels for edges) ----
   app.post("/api/llm/edge-relations", async (req, res) => {
     try {
@@ -255,12 +307,21 @@ async function startServer() {
       if (!Array.isArray(rows) || rows.length < 2) {
         return res.status(400).json({ error: "表格数据至少需要两行（表头 + 数据）" });
       }
-      // 只接受字符串二维数组，防止恶意 payload
-      const clean: string[][] = rows
+      // 接受字符串或 {text, isHeader} 单元对象二维数组，保留表头语义；防恶意 payload
+      const clean: Cell[][] = rows
         .slice(0, 100)
         .map((r) =>
           Array.isArray(r)
-            ? r.slice(0, 30).map((c) => String(c ?? "").slice(0, 200))
+            ? r.slice(0, 30).map((c) => {
+                if (c && typeof c === "object") {
+                  const cc = c as Record<string, unknown>;
+                  return {
+                    text: String(cc?.text ?? "").slice(0, 200),
+                    isHeader: cc?.isHeader === true,
+                  };
+                }
+                return { text: String(c ?? "").slice(0, 200) };
+              })
             : []
         )
         .filter((r) => r.length > 0);

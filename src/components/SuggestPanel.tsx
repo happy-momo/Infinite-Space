@@ -29,10 +29,16 @@ interface Props {
   onConnect: (targetId: string) => void;
   /** 重新分析当前节点：清掉该节点缓存并重新请求 */
   onReanalyze: () => void;
+  /** 画布上恰好选中的那个节点 id（无单选为 null） */
+  selectedNodeId: string | null;
+  /** 点击「源节点行」把联想源切到当前选中节点 */
+  onResetSource: (id: string) => void;
+  /** 是否允许换源（有单选且与当前源不同） */
+  canResetSource: boolean;
 }
 
-export function SuggestPanel({ open, onClose, sourceNode, nodes, suggestions, loading, error, onFocus, onConnect, onReanalyze }: Props) {
-  if (!sourceNode) return null;
+export function SuggestPanel({ open, onClose, sourceNode, nodes, suggestions, loading, error, onFocus, onConnect, onReanalyze, selectedNodeId, onResetSource, canResetSource }: Props) {
+  const noSource = !sourceNode && !loading;
 
   return (
     <AnimatePresence>
@@ -67,15 +73,41 @@ export function SuggestPanel({ open, onClose, sourceNode, nodes, suggestions, lo
             </div>
           </div>
 
-          {/* 当前源节点 */}
-          <div className="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 border-b border-black/5 dark:border-white/10">
-            源节点：<span className="font-medium text-gray-700 dark:text-gray-200 truncate">
-              {sourceNode.content.replace(/<[^>]*>/g, '').slice(0, 24) || sourceNode.type}
-            </span>
-          </div>
+          {/* 当前源节点 —— 恰好单选了一个不同的节点时可点击"换源" */}
+          {canResetSource && selectedNodeId ? (
+            <button
+              onClick={() => onResetSource(selectedNodeId)}
+              title="以当前选中的节点作为联想源"
+              className="w-full px-4 py-2 text-left text-xs text-gray-500 dark:text-gray-400 border-b border-black/5 dark:border-white/10 flex items-center justify-between gap-2 hover:bg-indigo-50/70 dark:hover:bg-indigo-500/10 transition-colors"
+            >
+              <span className="min-w-0">
+                源节点：<span className="font-medium text-gray-700 dark:text-gray-200">{sourceNode?.content.replace(/<[^>]*>/g, '').slice(0, 24) || sourceNode?.type || '未设置'}</span>
+              </span>
+              <span className="shrink-0 flex items-center gap-1 text-indigo-500 dark:text-indigo-300 text-[10px] font-medium">
+                <RefreshCw size={11} /> 换源到当前选中
+              </span>
+            </button>
+          ) : (
+            <div className="px-4 py-2 text-xs text-gray-500 dark:text-gray-400 border-b border-black/5 dark:border-white/10">
+              源节点：<span className="font-medium text-gray-700 dark:text-gray-200 truncate">
+                {sourceNode ? sourceNode.content.replace(/<[^>]*>/g, '').slice(0, 24) || sourceNode.type : '未设置'}
+              </span>
+            </div>
+          )}
 
-          {/* 结果列表 */}
+          {/* 结果列表 / 空态 */}
           <div className="flex-1 overflow-y-auto custom-scrollbar px-4 py-3 space-y-2">
+            {noSource && (
+              <div className="text-center py-12">
+                <p className="text-sm text-gray-400 mb-3">源节点已被删除或未设置</p>
+                <button
+                  onClick={onClose}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium text-white bg-gradient-to-br from-indigo-500 to-violet-500 hover:opacity-90 transition-opacity"
+                >
+                  关闭面板
+                </button>
+              </div>
+            )}
             {loading && (
               <div className="flex items-center justify-center py-10 text-sm text-gray-400">
                 <Loader2 size={18} className="animate-spin mr-2" /> 正在分析…
@@ -84,10 +116,10 @@ export function SuggestPanel({ open, onClose, sourceNode, nodes, suggestions, lo
             {error && (
               <div className="text-center py-10 text-sm text-red-500">{error}</div>
             )}
-            {!loading && !error && suggestions.length === 0 && (
+            {!noSource && !loading && !error && suggestions.length === 0 && (
               <div className="text-center py-10 text-sm text-gray-400">未找到相关节点</div>
             )}
-            {!loading && !error && suggestions.map((s, i) => {
+            {!noSource && !loading && !error && suggestions.map((s, i) => {
               const node = nodes.find((n) => n.id === s.nodeId);
               if (!node) return null;
               return (
